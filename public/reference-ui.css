@@ -1,0 +1,17 @@
+/* Credit Debit-style action strip: mobile-first */
+main{display:flex;flex-direction:column}
+main>.summary{order:1}
+main>.filterTabs{order:2}
+main>.layout{order:3}
+main>.quickActions{order:4}
+main>.reportTotals{order:5}
+.quickActions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:7px;direction:ltr}
+.quickActions button{height:50px;border:0;border-radius:5px;display:flex;align-items:center;justify-content:center;gap:8px;font-size:16px;font-weight:800;cursor:pointer;box-shadow:0 1px 3px #0002}
+.quickActions button span{display:inline-flex;align-items:center;gap:7px}
+.quickActions button:first-child{background:#b9e0fb;color:#1976d2}
+.quickActions button:last-child{background:#2196f3;color:#fff}
+.quickActions button:first-child span:before{content:'☷';font-size:23px;line-height:1}
+.quickActions button:last-child span:before{content:'♟';font-size:20px;line-height:1;transform:rotate(180deg)}
+.quickActions button:active{transform:scale(.99)}
+.reportTotals{margin-top:2px}
+@media(max-width:760px){main{padding-bottom:82px}.quickActions{gap:7px;margin-top:6px}.quickActions button{height:50px;border-radius:5px;font-size:15px}.quickActions button:first-child span:before{font-size:21px}.quickActions button:last-child span:before{font-size:18px}.reportTotals{margin-top:0}}

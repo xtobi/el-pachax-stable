@@ -1,0 +1,8 @@
+{
+  "name": "El Pachax",
+  "description": "Credit and debit ledger application for managing customer accounts, transactions, balances, and notes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
