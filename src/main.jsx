@@ -597,7 +597,7 @@ function App({ user }) {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${mobilePage === 'home' ? 'home-mode' : ''}`}>
       {/* Topbar */}
       <header className="topbar">
         <div className="brandSide">
@@ -621,7 +621,7 @@ function App({ user }) {
         </div>
       </header>
 
-      <main>
+      <main className={mobilePage === 'home' ? 'main-home' : ''}>
         {/* ===================== ACTIVE VIEWS ===================== */}
         {mobilePage === 'home' && (
           <div className="mobile-ref-home">
@@ -699,33 +699,36 @@ function App({ user }) {
               })}
             </div>
 
-            {/* Action Bar (Bottom of Home) */}
-            <div className="refActionBar">
-              <button className="txBtn" onClick={() => setMobilePage('all-transactions')}>
-                <span className="btnIcon">☷</span> Transactions
-              </button>
-              <button className="clientBtn" onClick={openAddPerson}>
-                <span className="btnIcon">✚</span> Ajouter un Client
-              </button>
-            </div>
+            {/* Fixed Bottom Action & Summary Section */}
+            <div className="refBottomFixed">
+              {/* Action Bar (Bottom of Home) */}
+              <div className="refActionBar">
+                <button className="txBtn" onClick={() => setMobilePage('all-transactions')}>
+                  <span className="btnIcon">☷</span> Transactions
+                </button>
+                <button className="clientBtn" onClick={openAddPerson}>
+                  <span className="btnIcon">✚</span> Ajouter un Client
+                </button>
+              </div>
 
-            {/* Reference Totals */}
-            <div className="refTotals">
-              <div className="refTotal av">
-                <b>Total Avance</b>
-                <strong>{formatAmountFr(totalAdvance)}</strong>
-              </div>
-              <div className="refTotal dt">
-                <b>Total Dette</b>
-                <strong>-{formatAmountFr(totalDette)}</strong>
-              </div>
-              <div className="refTotal sd">
-                <b>Solde</b>
-                <strong>
-                  {formatAmountFr(totalAdvance - totalDette)}
-                  <br />
-                  <span className="soldeSubText">{totalAdvance >= totalDette ? 'Avance' : 'Dette'}</span>
-                </strong>
+              {/* Reference Totals */}
+              <div className="refTotals">
+                <div className="refTotal av">
+                  <b>Total Avance</b>
+                  <strong>{formatAmountFr(totalAdvance)}</strong>
+                </div>
+                <div className="refTotal dt">
+                  <b>Total Dette</b>
+                  <strong>-{formatAmountFr(totalDette)}</strong>
+                </div>
+                <div className="refTotal sd">
+                  <b>Solde</b>
+                  <strong>
+                    {formatAmountFr(totalAdvance - totalDette)}
+                    <br />
+                    <span className="soldeSubText">{totalAdvance >= totalDette ? 'Avance' : 'Dette'}</span>
+                  </strong>
+                </div>
               </div>
             </div>
           </div>

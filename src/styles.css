@@ -4,13 +4,19 @@
 @media(min-width:761px){.ledgerHead .primary{min-width:140px}.people .search{position:sticky;top:0}.ledgerHead{min-height:88px}}
 
 /* --- Consolidated Mobile Reference & Polish Styles --- */
-.mobile-ref-home{display:block!important;width:100%;direction:ltr;background:#f4f6f8}
-  .refFilters{height:51px;background:#fff;border:1px solid #ddd;border-radius:28px;display:grid;grid-template-columns:repeat(4,1fr);overflow:hidden;margin:0 8px 8px}
+html:has(.home-mode),body:has(.home-mode){overflow:hidden;height:100%}
+.app.home-mode{height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
+.app.home-mode main,main.main-home{flex:1 1 auto;min-height:0;height:calc(100vh - 58px);height:calc(100dvh - 58px);padding:8px 0 0;margin:0 auto;overflow:hidden;display:flex;flex-direction:column;width:min(640px,100%)}
+@media(max-width:760px){
+  .app.home-mode main,main.main-home{height:calc(100vh - 56px);height:calc(100dvh - 56px);padding:7px 6px 0}
+}
+.mobile-ref-home{display:flex!important;flex-direction:column;width:100%;height:100%;flex:1 1 auto;min-height:0;overflow:hidden;direction:ltr;background:#f4f6f8;position:relative}
+  .refFilters{flex:0 0 auto;height:51px;background:#fff;border:1px solid #ddd;border-radius:28px;display:grid;grid-template-columns:repeat(4,1fr);overflow:hidden;margin:0 8px 8px}
   .refFilters button{border:0;border-left:1px solid #aaa;background:#fff;font-size:16px;color:#111;cursor:pointer;display:flex;align-items:center;justify-content:center}
   .refFilters button:first-child{border-left:0}
   .refFilters button.active{color:#2196f3;font-weight:700}
   
-  .refPeopleList{background:#fff;border-top:1px solid #eef0f3}
+  .refPeopleList{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;background:#fff;border-top:1px solid #eef0f3;padding-bottom:calc(190px + env(safe-area-inset-bottom, 0px))}
   .refPerson{min-height:120px;background:#fff;border-bottom:7px solid #eef0f3;width:100%;display:grid;grid-template-columns:52px minmax(0,1.25fr) 78px 105px 28px;align-items:start;text-align:left;padding:12px 6px 10px;direction:ltr;cursor:pointer;position:relative;box-sizing:border-box}
   .refPerson:hover{background:#fafbfc}
   .refAvatar{width:46px;height:46px;border-radius:50%;background:#f3f5f6;display:grid;place-items:center;color:#2196f3;font-size:22px;font-weight:700;flex-shrink:0}
@@ -29,13 +35,17 @@
   .refMore{font-size:26px;line-height:1;color:#111;text-align:center;cursor:pointer;z-index:2;background:transparent;border:0;padding:6px 2px;margin-top:-2px;border-radius:4px}
   .refMore:active{background:#eef0f3}
   
-  .refActionBar{display:grid!important;grid-template-columns:1fr 1fr;gap:8px;margin:10px 8px 8px;direction:ltr}
-  .refActionBar button{height:48px;border:0;border-radius:7px;font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:7px;cursor:pointer}
-  .refActionBar .txBtn{background:#bfe3fb;color:#2196f3}
-  .refActionBar .clientBtn{background:#2196f3;color:#fff}
+  .refBottomFixed{position:fixed;bottom:0;left:0;right:0;max-width:640px;width:100%;margin:0 auto;z-index:20;background:var(--bg);box-sizing:border-box;padding:0 6px env(safe-area-inset-bottom, 0px) 6px}
+  @media(min-width:761px){
+    .refBottomFixed{padding:0 0 env(safe-area-inset-bottom, 0px) 0}
+  }
+  .refBottomFixed .refActionBar,.refActionBar{display:grid!important;grid-template-columns:1fr 1fr;gap:8px;margin:8px 8px 6px;direction:ltr}
+  .refBottomFixed .refActionBar button,.refActionBar button{height:48px;border:0;border-radius:7px;font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:7px;cursor:pointer}
+  .refBottomFixed .refActionBar .txBtn,.refActionBar .txBtn{background:#bfe3fb;color:#2196f3}
+  .refBottomFixed .refActionBar .clientBtn,.refActionBar .clientBtn{background:#2196f3;color:#fff}
   .btnIcon{font-size:18px}
   
-  .refTotals{display:grid;grid-template-columns:1fr 1fr 1fr;min-height:105px;background:#fff;border:2px solid #222;margin:0 0 10px;box-sizing:border-box;direction:ltr}
+  .refBottomFixed .refTotals,.refTotals{display:grid;grid-template-columns:1fr 1fr 1fr;min-height:105px;background:#fff;border:2px solid #222;margin:0 0 6px;box-sizing:border-box;direction:ltr}
   .refTotal{border-left:2px solid #222!important;text-align:center;padding:8px 4px 6px;min-width:0;box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between}
   .refTotal:first-child{border-left:0!important}
   .refTotal b{display:block;font-size:17px;white-space:nowrap;color:#111}
