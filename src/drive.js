@@ -3,7 +3,7 @@ import { auth } from './firebase';
 
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const BACKUP_NAME = 'el-pachax-backup.json';
-const OWNER_EMAIL = 'huthelias39@gmail.com';
+const ALLOWED_EMAILS = ['huthelias39@gmail.com', 'ow3nez@gmail.com'];
 let cachedToken = null;
 let cachedTokenAt = 0;
 
@@ -13,7 +13,7 @@ async function getDriveAccessToken() {
   const provider = new GoogleAuthProvider();
   provider.addScope(DRIVE_SCOPE);
   const result = await signInWithPopup(auth, provider);
-  if (result.user.email?.toLowerCase() !== OWNER_EMAIL) throw new Error('غير مسموح بهذا الحساب');
+  if (!ALLOWED_EMAILS.includes(result.user.email?.toLowerCase())) throw new Error('غير مسموح بهذا الحساب');
   const credential = GoogleAuthProvider.credentialFromResult(result);
   const token = credential?.accessToken;
   if (!token) throw new Error('لم يتم الحصول على صلاحية Google Drive');

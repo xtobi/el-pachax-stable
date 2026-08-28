@@ -38,7 +38,7 @@ import './styles.css';
 import './accountEdit.css';
 import './reference-ui.css';
 
-const OWNER_EMAIL = 'huthelias39@gmail.com';
+const ALLOWED_EMAILS = ['huthelias39@gmail.com', 'ow3nez@gmail.com'];
 const today = () => new Date().toISOString().slice(0, 10);
 
 const MONTHS_FR = [
@@ -205,7 +205,7 @@ function LoginScreen() {
           <LogIn size={18} /> الدخول بحساب Google
         </button>
         {error && <div className="loginError">{error}</div>}
-        <small>الحساب المسموح: {OWNER_EMAIL}</small>
+        <small>الحسابات المسموحة: {ALLOWED_EMAILS.join(' | ')}</small>
       </div>
     </div>
   );
@@ -1203,7 +1203,7 @@ function Root() {
     );
   }
 
-  if (!user || user.email?.toLowerCase() !== OWNER_EMAIL) {
+  if (!user || !ALLOWED_EMAILS.includes(user.email?.toLowerCase())) {
     return <LoginScreen />;
   }
 
