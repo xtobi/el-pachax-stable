@@ -2,7 +2,7 @@ name: Deploy El Pachax to GitHub Pages
 
 on:
   push:
-    branches: [develop]
+    branches: [main, develop]
   workflow_dispatch:
 
 permissions:
@@ -28,7 +28,9 @@ jobs:
         run: npm install
 
       - name: Build
-        run: npm run build
+        run: |
+          npm run build
+          touch dist/.nojekyll
 
       - name: Publish dist to gh-pages
         uses: peaceiris/actions-gh-pages@v4
