@@ -31,12 +31,13 @@ import {
   Building2,
   Pencil,
   BellRing,
-  FileSignature
+  FileSignature,
+  Database
 } from 'lucide-react';
 import { auth, googleProvider } from './firebase';
-import { saveLedger, subscribeToLedger } from './cloudSync';
+import { saveLedger, subscribeToLedger, executeMigrationToFirestore, MIGRATION_VERSION } from './cloudSync';
 import { uploadBackupToDrive, downloadBackupFromDrive } from './drive';
-import { IMPORTED_PEOPLE } from './importedData';
+import { IMPORTED_DATABASE, IMPORTED_PEOPLE } from './importedData';
 import { validateAndNormalizeBackup, createSafetyBackup } from './backupUtils';
 import './styles.css';
 import './accountEdit.css';
@@ -271,6 +272,126 @@ function ConfirmDeleteModal({ person, onConfirm, onCancel }) {
   );
 }
 
+function MigrationPromptModal({ onConfirm, onCancel, loading, error }) {
+  return (
+    <div className="overlay" style={{ zIndex: 999999 }}>
+      <div
+        className="modal"
+        style={{ maxWidth: '440px', direction: 'rtl', textAlign: 'right' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            marginBottom: '14px'
+          }}
+        >
+          <div
+            style={{
+              width: '42px',
+              height: '42px',
+              borderRadius: '50%',
+              background: '#e0f2fe',
+              display: 'grid',
+              placeItems: 'center',
+              flexShrink: 0
+            }}
+          >
+            <Database size={22} color="#0284c7" />
+          </div>
+          <div>
+            <h3 style={{ margin: 0, fontSize: '17px', color: '#0f172a', lineHeight: '1.3' }}>
+              Replace current data with the imported database?
+            </h3>
+            <p style={{ margin: '3px 0 0', fontSize: '13px', color: '#64748b' }}>
+              carnetdedettes 29-août-2026.db (SQLite)
+            </p>
+          </div>
+        </div>
+
+        <div
+          style={{
+            background: '#f8fafc',
+            border: '1px solid #e2e8f0',
+            borderRadius: '8px',
+            padding: '12px 14px',
+            marginBottom: '16px'
+          }}
+        >
+          <p style={{ margin: '0 0 8px', fontSize: '14px', fontWeight: 'bold', color: '#1e293b' }}>
+            15 accounts and 66 transactions will replace your current data.
+          </p>
+          <ul style={{ margin: 0, paddingRight: '18px', fontSize: '13px', color: '#475569', lineHeight: '1.6' }}>
+            <li><strong>15 comptes vérifiés</strong> (avec soldes conformes à la base originale)</li>
+            <li><strong>66 transactions actives</strong> (2 transactions supprimées ont été exclues)</li>
+            <li>Une sauvegarde de sécurité de vos données actuelles sera conservée.</li>
+          </ul>
+        </div>
+
+        {error && (
+          <div
+            style={{
+              background: '#fef2f2',
+              border: '1px solid #fecaca',
+              borderRadius: '6px',
+              padding: '10px 12px',
+              color: '#991b1b',
+              fontSize: '13px',
+              marginBottom: '14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}
+          >
+            <AlertTriangle size={18} />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={loading}
+            style={{
+              minHeight: '40px',
+              padding: '8px 18px',
+              background: '#f1f5f9',
+              border: '1px solid #cbd5e1',
+              borderRadius: '6px',
+              fontWeight: '600',
+              color: '#334155',
+              cursor: loading ? 'not-allowed' : 'pointer'
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={loading}
+            style={{
+              minHeight: '40px',
+              padding: '8px 20px',
+              background: '#0284c7',
+              border: '0',
+              borderRadius: '6px',
+              fontWeight: '700',
+              color: '#fff',
+              cursor: loading ? 'not-allowed' : 'pointer',
+              boxShadow: '0 2px 4px rgba(2, 132, 199, 0.25)'
+            }}
+          >
+            {loading ? 'Remplacement en cours...' : 'Replace'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LoginScreen() {
   const [error, setError] = useState('');
   const [unauthorizedDomain, setUnauthorizedDomain] = useState(null);
@@ -350,6 +471,11 @@ function App({ user }) {
   const [restoreError, setRestoreError] = useState(null);
   const [restoreSuccess, setRestoreSuccess] = useState(null);
 
+  // One-time SQLite Migration state
+  const [showMigrationModal, setShowMigrationModal] = useState(false);
+  const [migrationLoading, setMigrationLoading] = useState(false);
+  const [migrationError, setMigrationError] = useState(null);
+
   // Settings state
   const [lastBackupTime, setLastBackupTime] = useState(
     () => localStorage.getItem('el-pachax-last-backup') || null
@@ -380,7 +506,7 @@ function App({ user }) {
   useEffect(() => {
     const unsubscribe = subscribeToLedger(
       user,
-      remote => {
+      (remote, docData) => {
         if (Array.isArray(remote)) {
           setPeople(remote);
           saveLocal(remote);
@@ -388,6 +514,13 @@ function App({ user }) {
       },
       err => {
         console.error('Firestore sync error:', err);
+      },
+      status => {
+        const localDone = localStorage.getItem('el-pachax-migration-completed') === MIGRATION_VERSION;
+        const dismissed = sessionStorage.getItem('el-pachax-migration-dismissed') === MIGRATION_VERSION;
+        if (!status?.migrationCompleted && !localDone && !dismissed) {
+          setShowMigrationModal(true);
+        }
       }
     );
     return unsubscribe;
@@ -585,6 +718,55 @@ function App({ user }) {
   function cancelRestore() {
     setShowConfirmRestore(false);
     setPendingRestoreData(null);
+  }
+
+  async function handleExecuteMigration() {
+    setMigrationError(null);
+    setMigrationLoading(true);
+    try {
+      // 1. Verify JSON structure and statistics (15 accounts, 66 transactions)
+      const validation = validateAndNormalizeBackup(IMPORTED_DATABASE);
+      if (!validation.success) {
+        throw new Error(validation.error || 'Échec de la validation de la base SQLite importée.');
+      }
+
+      if (validation.stats.totalAccounts !== 15 || validation.stats.totalTransactions !== 66) {
+        throw new Error(
+          `Vérification incorrecte : attendu 15 comptes et 66 transactions, trouvé ${validation.stats.totalAccounts} comptes et ${validation.stats.totalTransactions} transactions.`
+        );
+      }
+
+      const targetPeople = validation.people;
+
+      // 2. Safety snapshot before replacing
+      createSafetyBackup(people);
+
+      // 3. Atomically replace the ledger document in Firestore
+      await executeMigrationToFirestore(user, targetPeople);
+
+      // 4. Update local storage and React state
+      localStorage.setItem('el-pachax-migration-completed', MIGRATION_VERSION);
+      saveLocal(targetPeople);
+      setPeople(targetPeople);
+      setSelectedId(targetPeople[0]?.id || null);
+
+      // 5. Close modal & show success feedback
+      setShowMigrationModal(false);
+      const msg = 'Migration terminée avec succès : 15 comptes et 66 transactions importés dans votre compte Firestore ✓';
+      setRestoreSuccess(msg);
+      setTimeout(() => setRestoreSuccess(null), 7000);
+    } catch (err) {
+      console.error('Migration failed:', err);
+      setMigrationError(err?.message || 'Erreur lors de la migration. Les données actuelles restent inchangées.');
+    } finally {
+      setMigrationLoading(false);
+    }
+  }
+
+  function handleCancelMigration() {
+    setShowMigrationModal(false);
+    setMigrationError(null);
+    sessionStorage.setItem('el-pachax-migration-dismissed', MIGRATION_VERSION);
   }
 
   function openAddPerson() {
@@ -1544,6 +1726,16 @@ function App({ user }) {
           person={personToDelete}
           onConfirm={confirmDeletePerson}
           onCancel={cancelDeletePerson}
+        />
+      )}
+
+      {/* One-time SQLite Database Migration Modal */}
+      {showMigrationModal && (
+        <MigrationPromptModal
+          onConfirm={handleExecuteMigration}
+          onCancel={handleCancelMigration}
+          loading={migrationLoading}
+          error={migrationError}
         />
       )}
     </div>

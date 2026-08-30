@@ -1,10 +1,9 @@
 import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
-import { IMPORTED_PEOPLE } from './importedData';
 
-const IMPORT_VERSION = 'carnetdedettes-2026-08-27-v2';
+export const MIGRATION_VERSION = 'carnetdedettes-2026-08-29-v3-15p-66t';
 
-export function subscribeToLedger(user, onData, onError) {
+export function subscribeToLedger(user, onData, onError, onMigrationStatus) {
   if (!user?.uid) return () => {};
   const ref = doc(db, 'users', user.uid);
   let unsubscribe = () => {};
@@ -14,18 +13,20 @@ export function subscribeToLedger(user, onData, onError) {
     try {
       const snapshot = await getDoc(ref);
       const data = snapshot.exists() ? snapshot.data() : {};
-      if (data.importVersion !== IMPORT_VERSION) {
-        await setDoc(ref, {
-          people: IMPORTED_PEOPLE,
-          importVersion: IMPORT_VERSION,
-          importedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        }, { merge: true });
+      
+      const isCompleted = data.migrationCompleted === true && data.importVersion === MIGRATION_VERSION;
+      if (onMigrationStatus) {
+        onMigrationStatus({
+          migrationCompleted: isCompleted,
+          currentVersion: data.importVersion || null,
+          hasExistingData: snapshot.exists() && Array.isArray(data.people) && data.people.length > 0
+        });
       }
+
       if (cancelled) return;
       unsubscribe = onSnapshot(ref, nextSnapshot => {
         if (nextSnapshot.exists() && Array.isArray(nextSnapshot.data().people)) {
-          onData(nextSnapshot.data().people);
+          onData(nextSnapshot.data().people, nextSnapshot.data());
         }
       }, onError);
     } catch (error) {
@@ -40,11 +41,27 @@ export function subscribeToLedger(user, onData, onError) {
   };
 }
 
+export async function executeMigrationToFirestore(user, people) {
+  if (!user?.uid) throw new Error('Utilisateur non connecté');
+  const ref = doc(db, 'users', user.uid);
+  await setDoc(ref, {
+    people,
+    importVersion: MIGRATION_VERSION,
+    migrationCompleted: true,
+    importedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    sourceFile: 'carnetdedettes 29-août-2026.db',
+    totalAccounts: people.length,
+    totalTransactions: people.reduce((acc, p) => acc + (p.transactions?.length || 0), 0)
+  });
+}
+
 export async function saveLedger(user, people) {
   if (!user?.uid) return;
   await setDoc(doc(db, 'users', user.uid), {
     people,
-    importVersion: IMPORT_VERSION,
+    importVersion: MIGRATION_VERSION,
+    migrationCompleted: true,
     updatedAt: new Date().toISOString()
   }, { merge: true });
 }
