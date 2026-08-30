@@ -2,6 +2,7 @@ import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
 
 export const MIGRATION_VERSION = 'carnetdedettes-2026-08-29-v3-15p-66t';
+const FIRESTORE_WRITE_TIMEOUT_MS = 30 * 1000;
 
 /**
  * Recursively cleans and removes all keys with `undefined` values from objects
@@ -9,27 +10,27 @@ export const MIGRATION_VERSION = 'carnetdedettes-2026-08-29-v3-15p-66t';
  * Preserves valid null, false, 0, "", non-empty strings, numbers, etc.
  */
 export function sanitizeFirestoreData(data) {
-  if (data === undefined) {
-    return undefined;
-  }
-  if (data === null || typeof data !== 'object') {
-    return data;
-  }
+  if (data === undefined) return undefined;
+  if (data === null || typeof data !== 'object') return data;
   if (Array.isArray(data)) {
-    return data
-      .map(item => sanitizeFirestoreData(item))
-      .filter(item => item !== undefined);
+    return data.map(item => sanitizeFirestoreData(item)).filter(item => item !== undefined);
   }
   const clean = {};
   for (const [key, value] of Object.entries(data)) {
     if (value !== undefined) {
       const sanitized = sanitizeFirestoreData(value);
-      if (sanitized !== undefined) {
-        clean[key] = sanitized;
-      }
+      if (sanitized !== undefined) clean[key] = sanitized;
     }
   }
   return clean;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
 export function subscribeToLedger(user, onData, onError, onMigrationStatus) {
@@ -42,7 +43,6 @@ export function subscribeToLedger(user, onData, onError, onMigrationStatus) {
     try {
       const snapshot = await getDoc(ref);
       const data = snapshot.exists() ? snapshot.data() : {};
-      
       const isCompleted = data.migrationCompleted === true && data.importVersion === MIGRATION_VERSION;
       if (onMigrationStatus) {
         onMigrationStatus({
@@ -51,7 +51,6 @@ export function subscribeToLedger(user, onData, onError, onMigrationStatus) {
           hasExistingData: snapshot.exists() && Array.isArray(data.people) && data.people.length > 0
         });
       }
-
       if (cancelled) return;
       unsubscribe = onSnapshot(ref, nextSnapshot => {
         if (nextSnapshot.exists() && Array.isArray(nextSnapshot.data().people)) {
@@ -83,7 +82,11 @@ export async function executeMigrationToFirestore(user, people) {
     totalAccounts: people.length,
     totalTransactions: people.reduce((acc, p) => acc + (p.transactions?.length || 0), 0)
   });
-  await setDoc(ref, payload);
+  await withTimeout(
+    setDoc(ref, payload),
+    FIRESTORE_WRITE_TIMEOUT_MS,
+    'La synchronisation Firestore a pris trop de temps. Vérifiez votre connexion Internet puis réessayez.'
+  );
 }
 
 export async function saveLedger(user, people) {
@@ -94,5 +97,9 @@ export async function saveLedger(user, people) {
     migrationCompleted: true,
     updatedAt: new Date().toISOString()
   });
-  await setDoc(doc(db, 'users', user.uid), payload, { merge: true });
+  await withTimeout(
+    setDoc(doc(db, 'users', user.uid), payload, { merge: true }),
+    FIRESTORE_WRITE_TIMEOUT_MS,
+    'La synchronisation Firestore a pris trop de temps. Vérifiez votre connexion Internet puis réessayez.'
+  );
 }
