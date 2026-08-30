@@ -1,30 +1,20 @@
 import { collection, deleteDoc, doc, getDocs, setDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 
-const MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024; // 10MB source image
-const FIRESTORE_PHOTO_MAX_BYTES = 180 * 1024; // safely below Firestore's 1 MiB document limit
+const MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024;
+const FIRESTORE_PHOTO_MAX_BYTES = 180 * 1024;
 const FIRESTORE_WRITE_TIMEOUT_MS = 30 * 1000;
+const PHOTO_SYNC_CACHE_KEY = 'el-pachax-photo-sync-signatures';
 
 export function validateImageFile(file) {
-  if (!file) {
-    return { valid: false, error: 'Aucun fichier sélectionné.' };
-  }
-
+  if (!file) return { valid: false, error: 'Aucun fichier sélectionné.' };
   const mime = String(file.type || '').toLowerCase();
   if (!mime.startsWith('image/')) {
-    return {
-      valid: false,
-      error: 'Format non supporté. Veuillez sélectionner une image (JPG, PNG, WebP).'
-    };
+    return { valid: false, error: 'Format non supporté. Veuillez sélectionner une image (JPG, PNG, WebP).' };
   }
-
   if (file.size > MAX_INPUT_FILE_SIZE) {
-    return {
-      valid: false,
-      error: 'Image trop volumineuse. Veuillez choisir une image plus petite (max 10 Mo).'
-    };
+    return { valid: false, error: 'Image trop volumineuse. Veuillez choisir une image plus petite (max 10 Mo).' };
   }
-
   return { valid: true };
 }
 
@@ -45,15 +35,33 @@ function withTimeout(promise, timeoutMs, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
+function clearPhotoCache(personId) {
+  try {
+    const cache = JSON.parse(localStorage.getItem(PHOTO_SYNC_CACHE_KEY) || '{}');
+    delete cache[String(personId)];
+    localStorage.setItem(PHOTO_SYNC_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+}
+
+function clearPhotoCacheByDataUrl(dataUrl) {
+  if (typeof dataUrl !== 'string') return;
+  try {
+    const cache = JSON.parse(localStorage.getItem(PHOTO_SYNC_CACHE_KEY) || '{}');
+    const signature = `${dataUrl.length}:${dataUrl.slice(0, 80)}:${dataUrl.slice(-80)}`;
+    for (const [personId, value] of Object.entries(cache)) {
+      if (value === signature) delete cache[personId];
+    }
+    localStorage.setItem(PHOTO_SYNC_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+}
+
 export function processProfileImage(file, targetDimension = 384, quality = 0.78) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Erreur lors de la lecture du fichier image.'));
-
     reader.onload = e => {
       const img = new Image();
       img.onerror = () => reject(new Error("Impossible de charger le format de l'image."));
-
       img.onload = () => {
         try {
           const canvas = document.createElement('canvas');
@@ -92,28 +100,17 @@ export function processProfileImage(file, targetDimension = 384, quality = 0.78)
           reject(err);
         }
       };
-
       img.src = e.target.result;
     };
-
     reader.readAsDataURL(file);
   });
 }
 
-/**
- * Stores the processed avatar in:
- * /users/{uid}/profilePhotos/{personId}
- *
- * The existing downloadUrl return name is intentionally preserved so the
- * current UI code does not need to know that Storage has been removed.
- */
 export async function uploadProfilePhotoToFirestore(userId, personId, blob, onProgress) {
   if (!userId) throw new Error('Utilisateur non identifié. Veuillez vous reconnecter.');
   if (!personId) throw new Error('Identifiant du compte manquant.');
   if (!(blob instanceof Blob) || blob.size <= 0) throw new Error('Image vide ou invalide.');
-  if (blob.size > FIRESTORE_PHOTO_MAX_BYTES) {
-    throw new Error('La photo est trop volumineuse après compression.');
-  }
+  if (blob.size > FIRESTORE_PHOTO_MAX_BYTES) throw new Error('La photo est trop volumineuse après compression.');
 
   onProgress?.(10);
   const dataUrl = await blobToDataUrl(blob);
@@ -134,13 +131,12 @@ export async function uploadProfilePhotoToFirestore(userId, personId, blob, onPr
     FIRESTORE_WRITE_TIMEOUT_MS,
     'La sauvegarde de la photo dans Firestore a pris trop de temps. Vérifiez votre connexion Internet.'
   );
+  clearPhotoCache(personId);
   onProgress?.(100);
-
   return { downloadUrl: dataUrl, storagePath: `firestore:users/${userId}/profilePhotos/${personId}` };
 }
 
 export async function deleteProfilePhotoFromFirestore(userId, personId) {
-  // New code can pass uid + personId directly.
   if (userId && personId) {
     const photoRef = doc(db, 'users', String(userId), 'profilePhotos', String(personId));
     try {
@@ -149,14 +145,13 @@ export async function deleteProfilePhotoFromFirestore(userId, personId) {
         FIRESTORE_WRITE_TIMEOUT_MS,
         'La suppression de la photo dans Firestore a pris trop de temps.'
       );
+      clearPhotoCache(personId);
     } catch (err) {
       console.warn('Could not delete Firestore profile image:', err?.code || err?.message || err);
     }
     return;
   }
 
-  // Backward compatibility: the current UI passes the old photoURL/data URL only.
-  // Find the matching profile-photo document for the signed-in user and delete it.
   const photoDataUrl = userId;
   const uid = auth.currentUser?.uid;
   if (!uid || typeof photoDataUrl !== 'string') return;
@@ -174,12 +169,14 @@ export async function deleteProfilePhotoFromFirestore(userId, personId) {
         FIRESTORE_WRITE_TIMEOUT_MS,
         'La suppression de la photo dans Firestore a pris trop de temps.'
       );
+      clearPhotoCache(matching.id);
+    } else {
+      clearPhotoCacheByDataUrl(photoDataUrl);
     }
   } catch (err) {
     console.warn('Could not delete Firestore profile image:', err?.code || err?.message || err);
   }
 }
 
-// Backward-compatible names used by the existing UI.
 export const uploadProfilePhotoToStorage = uploadProfilePhotoToFirestore;
 export const deleteProfilePhotoFromStorage = deleteProfilePhotoFromFirestore;
