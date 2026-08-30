@@ -42,3 +42,24 @@ export async function uploadBackupToDrive(people) {
   if (!response.ok) throw new Error('فشل إنشاء النسخة الاحتياطية');
   return response.json();
 }
+
+export async function downloadBackupFromDrive() {
+  const token = await getDriveAccessToken();
+  const q = encodeURIComponent(`name='${BACKUP_NAME}' and trashed=false`);
+  const list = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!list.ok) throw new Error('تعذر الوصول إلى Google Drive');
+  const files = (await list.json()).files;
+  if (!files || files.length === 0) {
+    throw new Error('لم يتم العثور على أي نسخة احتياطية (el-pachax-backup.json) في Google Drive');
+  }
+  const fileId = files[0].id;
+  const downloadResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!downloadResponse.ok) {
+    throw new Error('فشل تحميل ملف النسخة الاحتياطية من Google Drive');
+  }
+  return await downloadResponse.text();
+}

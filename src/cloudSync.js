@@ -44,6 +44,7 @@ export async function saveLedger(user, people) {
   if (!user?.uid) return;
   await setDoc(doc(db, 'users', user.uid), {
     people,
+    importVersion: IMPORT_VERSION,
     updatedAt: new Date().toISOString()
   }, { merge: true });
 }

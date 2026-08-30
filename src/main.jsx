@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
@@ -10,6 +10,9 @@ import {
   ArrowUpRight,
   FileText,
   Download,
+  Upload,
+  AlertTriangle,
+  CheckCircle2,
   Cloud,
   HardDrive,
   Settings,
@@ -32,8 +35,9 @@ import {
 } from 'lucide-react';
 import { auth, googleProvider } from './firebase';
 import { saveLedger, subscribeToLedger } from './cloudSync';
-import { uploadBackupToDrive } from './drive';
+import { uploadBackupToDrive, downloadBackupFromDrive } from './drive';
 import { IMPORTED_PEOPLE } from './importedData';
+import { validateAndNormalizeBackup, createSafetyBackup } from './backupUtils';
 import './styles.css';
 import './accountEdit.css';
 import './reference-ui.css';
@@ -148,7 +152,7 @@ function loadInitialPeople() {
     const s = localStorage.getItem('el-pachax-people');
     if (s) {
       const parsed = JSON.parse(s);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed)) return parsed;
     }
   } catch {}
   return IMPORTED_PEOPLE;
@@ -176,20 +180,118 @@ function exportLocal(people) {
   URL.revokeObjectURL(url);
 }
 
+function formatLastBackup(isoString) {
+  if (!isoString) return 'Dernière sauvegarde : Jamais';
+  const d = parseDate(isoString);
+  if (!d) return 'Dernière sauvegarde : Jamais';
+  const pad = n => String(n).padStart(2, '0');
+  const day = pad(d.getDate());
+  const month = pad(d.getMonth() + 1);
+  const year = d.getFullYear();
+  const hours = pad(d.getHours());
+  const minutes = pad(d.getMinutes());
+  return `Dernière sauvegarde : ${day}/${month}/${year} à ${hours}:${minutes}`;
+}
+
+function ConfirmDeleteModal({ person, onConfirm, onCancel }) {
+  if (!person) return null;
+  return (
+    <div className="overlay" style={{ zIndex: 99999 }} onClick={onCancel}>
+      <div
+        className="modal"
+        style={{ maxWidth: '400px', direction: 'rtl', textAlign: 'right' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            color: '#d32f2f',
+            marginBottom: '12px'
+          }}
+        >
+          <div
+            style={{
+              width: '38px',
+              height: '38px',
+              borderRadius: '50%',
+              background: '#fee2e2',
+              display: 'grid',
+              placeItems: 'center',
+              flexShrink: 0
+            }}
+          >
+            <Trash2 size={20} color="#dc2626" />
+          </div>
+          <h3 style={{ margin: 0, fontSize: '18px', color: '#1e293b' }}>
+            Supprimer ce compte ?
+          </h3>
+        </div>
+        <p style={{ margin: '0 0 16px', color: '#475569', fontSize: '14px', lineHeight: '1.5' }}>
+          Cette action supprimera définitivement le compte <strong>{person.name}</strong> et ses données.
+        </p>
+        <div className="actions" style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{
+              minHeight: '40px',
+              padding: '8px 16px',
+              background: '#f1f5f9',
+              border: '1px solid #cbd5e1',
+              borderRadius: '6px',
+              fontWeight: '600',
+              color: '#334155',
+              cursor: 'pointer'
+            }}
+          >
+            Annuler
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            style={{
+              minHeight: '40px',
+              padding: '8px 18px',
+              background: '#dc2626',
+              border: '0',
+              borderRadius: '6px',
+              fontWeight: '700',
+              color: '#fff',
+              cursor: 'pointer',
+              boxShadow: '0 2px 4px rgba(220, 38, 38, 0.25)'
+            }}
+          >
+            Supprimer
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LoginScreen() {
   const [error, setError] = useState('');
+  const [unauthorizedDomain, setUnauthorizedDomain] = useState(null);
+
   async function login() {
     setError('');
+    setUnauthorizedDomain(null);
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (e) {
-      setError(
-        e?.code === 'auth/popup-blocked'
-          ? 'المتصفح منع نافذة Google. اسمح بالنوافذ المنبثقة لهذا الموقع ثم حاول مرة أخرى.'
-          : e?.code === 'auth/popup-closed-by-user'
-          ? 'تم إغلاق نافذة Google قبل إكمال تسجيل الدخول.'
-          : `تعذر تسجيل الدخول (${e?.code || 'unknown-error'}). تأكد من إعداد Google/Firebase ثم حاول مرة أخرى.`
-      );
+      if (e?.code === 'auth/unauthorized-domain') {
+        const currentDomain = window.location.hostname;
+        setUnauthorizedDomain(currentDomain);
+        setError(`النطاق الحالي (${currentDomain}) غير مصرح به في Firebase Authentication.`);
+      } else if (e?.code === 'auth/popup-blocked') {
+        setError('المتصفح منع نافذة Google. اسمح بالنوافذ المنبثقة لهذا الموقع ثم حاول مرة أخرى.');
+      } else if (e?.code === 'auth/popup-closed-by-user') {
+        setError('تم إغلاق نافذة Google قبل إكمال تسجيل الدخول.');
+      } else {
+        setError(`تعذر تسجيل الدخول (${e?.code || 'unknown-error'}). تأكد من إعداد Google/Firebase ثم حاول مرة أخرى.`);
+      }
     }
   }
 
@@ -205,6 +307,16 @@ function LoginScreen() {
           <LogIn size={18} /> الدخول بحساب Google
         </button>
         {error && <div className="loginError">{error}</div>}
+        {unauthorizedDomain && (
+          <div style={{ marginTop: '10px', padding: '10px', background: '#fffbeb', border: '1px solid #fef3c7', borderRadius: '6px', fontSize: '12px', color: '#92400e', textAlign: 'right', direction: 'rtl' }}>
+            <b>خطوات السماح بالنطاق:</b>
+            <ol style={{ margin: '6px 0 0', paddingRight: '18px', lineHeight: '1.6' }}>
+              <li>افتح <a href="https://console.firebase.google.com/project/el-pacha/authentication/settings" target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontWeight: 'bold' }}>Firebase Console</a></li>
+              <li>انتقل إلى <b>Authentication</b> &gt; <b>Settings</b> &gt; <b>Authorized domains</b></li>
+              <li>أضف النطاق: <code style={{ direction: 'ltr', display: 'inline-block', background: '#f1f5f9', padding: '2px 5px', borderRadius: '4px', color: '#0f172a' }}>{unauthorizedDomain}</code></li>
+            </ol>
+          </div>
+        )}
         <small>الحسابات المسموحة: {ALLOWED_EMAILS.join(' | ')}</small>
       </div>
     </div>
@@ -222,20 +334,39 @@ function App({ user }) {
   // Modals
   const [showPerson, setShowPerson] = useState(false);
   const [showTransaction, setShowTransaction] = useState(false);
-  const [showExport, setShowExport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showPersonActions, setShowPersonActions] = useState(false);
   const [showAccountPicker, setShowAccountPicker] = useState(false);
   const [pickerSearch, setPickerSearch] = useState('');
   const [editingPersonId, setEditingPersonId] = useState(null);
   const [editScreen, setEditScreen] = useState(false);
+  const [personToDelete, setPersonToDelete] = useState(null);
+  const [showConfirmDeletePerson, setShowConfirmDeletePerson] = useState(false);
+
+  // Restore state
+  const fileInputRef = useRef(null);
+  const [pendingRestoreData, setPendingRestoreData] = useState(null);
+  const [showConfirmRestore, setShowConfirmRestore] = useState(false);
+  const [restoreError, setRestoreError] = useState(null);
+  const [restoreSuccess, setRestoreSuccess] = useState(null);
 
   // Settings state
+  const [lastBackupTime, setLastBackupTime] = useState(
+    () => localStorage.getItem('el-pachax-last-backup') || null
+  );
   const [autoDriveBackup, setAutoDriveBackup] = useState(
     () => localStorage.getItem('el-pachax-auto-drive') === 'true'
   );
   const [syncing, setSyncing] = useState(false);
   const [driveStatus, setDriveStatus] = useState('');
+
+  function recordSuccessfulBackup() {
+    const iso = new Date().toISOString();
+    setLastBackupTime(iso);
+    try {
+      localStorage.setItem('el-pachax-last-backup', iso);
+    } catch {}
+  }
 
   // Forms state
   const [personName, setPersonName] = useState('');
@@ -250,7 +381,7 @@ function App({ user }) {
     const unsubscribe = subscribeToLedger(
       user,
       remote => {
-        if (Array.isArray(remote) && remote.length > 0) {
+        if (Array.isArray(remote)) {
           setPeople(remote);
           saveLocal(remote);
         }
@@ -337,6 +468,7 @@ function App({ user }) {
       if (autoDriveBackup) {
         setDriveStatus('جاري تحديث Google Drive...');
         await uploadBackupToDrive(next);
+        recordSuccessfulBackup();
         setDriveStatus('تم تحديث Google Drive ✓');
       }
     } catch (e) {
@@ -346,14 +478,113 @@ function App({ user }) {
     }
   }
 
+  function handleExportLocal() {
+    try {
+      exportLocal(people);
+      recordSuccessfulBackup();
+      setRestoreError(null);
+      setRestoreSuccess('تم تصدير النسخة الاحتياطية بنجاح إلى هذا الجهاز ✓');
+      setTimeout(() => setRestoreSuccess(null), 4000);
+    } catch (e) {
+      setRestoreError('تعذر تصدير النسخة الاحتياطية محلياً');
+    }
+  }
+
   async function manualDriveExport() {
     try {
-      setDriveStatus('جاري التصدير...');
+      setRestoreError(null);
+      setDriveStatus('جاري التصدير إلى Google Drive...');
       await uploadBackupToDrive(people);
+      recordSuccessfulBackup();
       setDriveStatus('تم التصدير إلى Google Drive ✓');
+      setRestoreSuccess('تم حفظ النسخة الاحتياطية في Google Drive بنجاح ✓');
+      setTimeout(() => setRestoreSuccess(null), 4000);
     } catch (e) {
       setDriveStatus(e?.message || 'تعذر التصدير إلى Google Drive');
+      setRestoreError(e?.message || 'تعذر التصدير إلى Google Drive');
     }
+  }
+
+  async function manualDriveImport() {
+    setRestoreError(null);
+    setDriveStatus('جاري جلب النسخة الاحتياطية من Google Drive...');
+    try {
+      const rawContent = await downloadBackupFromDrive();
+      const result = validateAndNormalizeBackup(rawContent);
+      if (!result.success) {
+        setRestoreError(result.error);
+        setPendingRestoreData(null);
+        setDriveStatus('ملف النسخة الاحتياطية غير صالح');
+        return;
+      }
+      setDriveStatus(null);
+      setRestoreError(null);
+      setPendingRestoreData({ ...result, source: 'Google Drive' });
+      setShowConfirmRestore(true);
+    } catch (e) {
+      setRestoreError(e?.message || 'تعذر استيراد النسخة من Google Drive');
+      setDriveStatus(e?.message || 'تعذر الوصول إلى Google Drive');
+    }
+  }
+
+  function triggerLocalFileSelect() {
+    setRestoreError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }
+
+  function handleLocalFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result;
+      const result = validateAndNormalizeBackup(content);
+      if (!result.success) {
+        setRestoreError(result.error);
+        setPendingRestoreData(null);
+        return;
+      }
+      setRestoreError(null);
+      setPendingRestoreData(result);
+      setShowConfirmRestore(true);
+    };
+    reader.onerror = () => {
+      setRestoreError('تعذر قراءة ملف النسخة الاحتياطية من الجهاز.');
+    };
+    reader.readAsText(file);
+  }
+
+  async function executeRestore() {
+    if (!pendingRestoreData?.people) return;
+    const targetPeople = pendingRestoreData.people;
+    const stats = pendingRestoreData.stats;
+
+    // 1. Create safety backup of current data
+    createSafetyBackup(people);
+
+    // 2. Clear pending restore and confirmation dialog
+    setShowConfirmRestore(false);
+    setPendingRestoreData(null);
+
+    // 3. Immediately apply to React state, localStorage & Firestore
+    setSelectedId(targetPeople[0]?.id || null);
+    await commit(targetPeople);
+
+    // 4. Show success message
+    const msg = `تم استيراد واستعادة البيانات بنجاح: ${stats.totalAccounts} حساب و ${stats.totalTransactions} معاملة ✓`;
+    setRestoreSuccess(msg);
+    setTimeout(() => {
+      setRestoreSuccess(null);
+    }, 6000);
+  }
+
+  function cancelRestore() {
+    setShowConfirmRestore(false);
+    setPendingRestoreData(null);
   }
 
   function openAddPerson() {
@@ -452,13 +683,33 @@ function App({ user }) {
     setEditingPersonId(null);
   }
 
-  function deletePerson() {
-    if (editingPersonId === null) return;
-    const next = people.filter(p => p.id !== editingPersonId);
-    commit(next);
+  function requestDeletePerson(p) {
+    if (!p || !p.id) return;
+    setPersonToDelete(p);
+    setShowPersonActions(false);
+    setShowConfirmDeletePerson(true);
+  }
+
+  function cancelDeletePerson() {
+    setShowConfirmDeletePerson(false);
+    setPersonToDelete(null);
+  }
+
+  async function confirmDeletePerson() {
+    if (!personToDelete?.id) return;
+    const targetId = personToDelete.id;
+    const next = people.filter(p => p.id !== targetId);
+
+    setShowConfirmDeletePerson(false);
+    setPersonToDelete(null);
+    setShowPersonActions(false);
     setEditScreen(false);
     setEditingPersonId(null);
+
+    setMobilePage('home');
     setSelectedId(next[0]?.id || null);
+
+    await commit(next);
   }
 
   function addTransaction(e) {
@@ -498,6 +749,7 @@ function App({ user }) {
   }
 
   if (editScreen && editingPersonId !== null) {
+    const currentEditingPerson = people.find(p => p.id === editingPersonId);
     return (
       <div className="accountEditPage">
         <header className="accountEditHeader">
@@ -511,7 +763,15 @@ function App({ user }) {
             <ArrowLeft size={22} />
           </button>
           <h1>Modifier un compte</h1>
-          <button className="editDelete" onClick={deletePerson}>
+          <button
+            type="button"
+            className="editDelete"
+            onClick={() => {
+              if (currentEditingPerson) {
+                requestDeletePerson(currentEditingPerson);
+              }
+            }}
+          >
             <Trash2 size={19} />
           </button>
         </header>
@@ -567,6 +827,13 @@ function App({ user }) {
           </div>
           <button className="saveEditButton">Sauvegarder et quitter</button>
         </form>
+        {showConfirmDeletePerson && personToDelete && (
+          <ConfirmDeleteModal
+            person={personToDelete}
+            onConfirm={confirmDeletePerson}
+            onCancel={cancelDeletePerson}
+          />
+        )}
       </div>
     );
   }
@@ -622,6 +889,19 @@ function App({ user }) {
       </header>
 
       <main className={mobilePage === 'home' ? 'main-home' : ''}>
+        {restoreSuccess && (
+          <div className="restoreSuccessBanner" style={{ margin: '0 8px 10px', direction: 'rtl' }}>
+            <CheckCircle2 size={18} />
+            <span style={{ flex: 1 }}>{restoreSuccess}</span>
+            <button
+              type="button"
+              style={{ background: 'transparent', border: 0, cursor: 'pointer', color: 'inherit' }}
+              onClick={() => setRestoreSuccess(null)}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
         {/* ===================== ACTIVE VIEWS ===================== */}
         {mobilePage === 'home' && (
           <div className="mobile-ref-home">
@@ -972,16 +1252,13 @@ function App({ user }) {
             <button onClick={() => setShowPersonActions(false)}>
               <FileSignature size={17} /> Signet
             </button>
-            <button onClick={() => openEditPerson(selectedPerson)}>
+            <button type="button" onClick={() => openEditPerson(selectedPerson)}>
               <Pencil size={17} /> Modifier un compte
             </button>
             <button
+              type="button"
               className="dangerAction"
-              onClick={() => {
-                setShowPersonActions(false);
-                setEditingPersonId(selectedPerson.id);
-                setEditScreen(true);
-              }}
+              onClick={() => requestDeletePerson(selectedPerson)}
             >
               <Trash2 size={17} /> Supprimer Compte
             </button>
@@ -1028,20 +1305,72 @@ function App({ user }) {
                 </>
               )}
             </div>
-            <div className="actions">
-              <button type="button" onClick={() => setShowSettings(false)}>
-                إغلاق
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => {
-                  setShowSettings(false);
-                  setShowExport(true);
-                }}
-              >
-                <Download size={16} /> تصدير
-              </button>
+
+            {/* BACKUP & RESTORE SECTION */}
+            <div className="settingsSection">
+              <div className="settingsSectionTitle">BACKUP & RESTORE</div>
+
+              {/* EXPORT */}
+              <div className="backupGroup">
+                <span className="backupGroupLabel">EXPORT</span>
+                <div className="backupButtonGroup">
+                  <button
+                    type="button"
+                    className="backupBtn exportDrive"
+                    onClick={manualDriveExport}
+                  >
+                    <Cloud size={16} /> Export to Drive
+                  </button>
+                  <button
+                    type="button"
+                    className="backupBtn exportLocal"
+                    onClick={handleExportLocal}
+                  >
+                    <HardDrive size={16} /> Export to Local
+                  </button>
+                </div>
+              </div>
+
+              {/* IMPORT / RESTORE */}
+              <div className="backupGroup">
+                <span className="backupGroupLabel">IMPORT / RESTORE</span>
+                <div className="backupButtonGroup">
+                  <button
+                    type="button"
+                    className="backupBtn importDrive"
+                    onClick={manualDriveImport}
+                  >
+                    <Download size={16} /> Import from Drive
+                  </button>
+                  <button
+                    type="button"
+                    className="backupBtn importLocal"
+                    onClick={triggerLocalFileSelect}
+                  >
+                    <Upload size={16} /> Import from Local
+                  </button>
+                </div>
+              </div>
+
+              {/* Last Backup Notice */}
+              <div className="lastBackupNotice">
+                {formatLastBackup(lastBackupTime)}
+              </div>
+
+              {restoreError && (
+                <div className="restoreErrorBanner" style={{ marginTop: '10px' }}>
+                  <AlertTriangle size={18} /> {restoreError}
+                </div>
+              )}
+              {restoreSuccess && (
+                <div className="restoreSuccessBanner" style={{ marginTop: '10px' }}>
+                  <CheckCircle2 size={18} /> {restoreSuccess}
+                </div>
+              )}
+            </div>
+
+            {/* Bottom Actions */}
+            <div className="actions" style={{ marginTop: '16px' }}>
               <button
                 type="button"
                 className="secondary"
@@ -1049,38 +1378,61 @@ function App({ user }) {
               >
                 <LogOut size={16} /> تسجيل الخروج
               </button>
+              <button type="button" onClick={() => setShowSettings(false)}>
+                إغلاق
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Export Modal */}
-      {showExport && (
-        <div className="overlay" onClick={() => setShowExport(false)}>
-          <div className="modal exportModal" onClick={e => e.stopPropagation()}>
-            <h3>تصدير البيانات</h3>
-            <p className="modalHint">اختر طريقة التصدير التي تريدها.</p>
-            <button className="exportOption" onClick={() => exportLocal(people)}>
-              <span className="exportIcon local">
-                <HardDrive />
-              </span>
-              <span>
-                <b>Export to Local</b>
-                <small>حفظ نسخة احتياطية على هذا الجهاز</small>
-              </span>
-            </button>
-            <button className="exportOption" onClick={manualDriveExport}>
-              <span className="exportIcon cloud">
-                <Cloud />
-              </span>
-              <span>
-                <b>Export to Google Drive</b>
-                <small>حفظ أو تحديث نسخة واحدة في Google Drive</small>
-              </span>
-            </button>
-            {driveStatus && <div className="syncStatus">☁️ {driveStatus}</div>}
+      {/* Hidden input for local JSON backup import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        style={{ display: 'none' }}
+        onChange={handleLocalFileSelect}
+      />
+
+      {/* Restore Confirmation Modal */}
+      {showConfirmRestore && pendingRestoreData && (
+        <div className="overlay">
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modalTitle">
+              <h3>تأكيد استيراد النسخة الاحتياطية</h3>
+              <button className="close" onClick={cancelRestore}>
+                <X size={19} />
+              </button>
+            </div>
+
+            <div className="restoreStats">
+              <b>معلومات النسخة الاحتياطية المحددة:</b>
+              <ul>
+                <li>عدد الحسابات (العملاء): <strong>{pendingRestoreData.stats?.totalAccounts}</strong></li>
+                <li>إجمالي المعاملات: <strong>{pendingRestoreData.stats?.totalTransactions}</strong></li>
+                {pendingRestoreData.stats?.exportedAt && (
+                  <li>تاريخ التصدير: <strong>{new Date(pendingRestoreData.stats.exportedAt).toLocaleString('fr-FR')}</strong></li>
+                )}
+              </ul>
+            </div>
+
+            <div className="restoreNotice">
+              <strong>⚠️ تحذير:</strong> سيتم استبدال جميع البيانات الحالية في التطبيق بالكامل بالبيانات المستوردة من هذه النسخة الاحتياطية. تم حفظ نسخة احتياطية أمان تلقائياً من بياناتك الحالية قبل الاستبدال.
+            </div>
+
             <div className="actions">
-              <button onClick={() => setShowExport(false)}>إغلاق</button>
+              <button type="button" onClick={cancelRestore}>
+                إلغاء
+              </button>
+              <button
+                type="button"
+                className="primary"
+                style={{ background: '#d32f2f', color: '#fff' }}
+                onClick={executeRestore}
+              >
+                تأكيد واستبدال البيانات
+              </button>
             </div>
           </div>
         </div>
@@ -1184,6 +1536,15 @@ function App({ user }) {
             </div>
           </form>
         </div>
+      )}
+
+      {/* Account Delete Confirmation Modal */}
+      {showConfirmDeletePerson && personToDelete && (
+        <ConfirmDeleteModal
+          person={personToDelete}
+          onConfirm={confirmDeletePerson}
+          onCancel={cancelDeletePerson}
+        />
       )}
     </div>
   );
