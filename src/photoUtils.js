@@ -1,7 +1,9 @@
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage } from './firebase';
 
 const MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const UPLOAD_TIMEOUT_MS = 60 * 1000;
+const DOWNLOAD_URL_TIMEOUT_MS = 20 * 1000;
 
 /**
  * Validates selected file is an image and within size limit.
@@ -12,7 +14,8 @@ export function validateImageFile(file) {
   }
 
   const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  if (!file.type.startsWith('image/') && !validTypes.includes(file.type.toLowerCase())) {
+  const mime = String(file.type || '').toLowerCase();
+  if (!mime.startsWith('image/') && !validTypes.includes(mime)) {
     return {
       valid: false,
       error: 'Format non supporté. Veuillez sélectionner une image (JPG, PNG, WebP).'
@@ -45,7 +48,7 @@ export function processProfileImage(file, targetDimension = 512, quality = 0.85)
       const img = new Image();
 
       img.onerror = () => {
-        reject(new Error('Impossible de charger le format de l\'image.'));
+        reject(new Error("Impossible de charger le format de l'image."));
       };
 
       img.onload = () => {
@@ -59,14 +62,12 @@ export function processProfileImage(file, targetDimension = 512, quality = 0.85)
             return reject(new Error('Canvas context not available.'));
           }
 
-          // Center-crop to square
           const minEdge = Math.min(img.width, img.height);
           const sx = (img.width - minEdge) / 2;
           const sy = (img.height - minEdge) / 2;
 
           ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = 'high';
-
           ctx.drawImage(
             img,
             sx,
@@ -82,7 +83,7 @@ export function processProfileImage(file, targetDimension = 512, quality = 0.85)
           canvas.toBlob(
             blob => {
               if (!blob) {
-                return reject(new Error('Erreur lors de la compression de l\'image.'));
+                return reject(new Error("Erreur lors de la compression de l'image."));
               }
               const previewUrl = URL.createObjectURL(blob);
               resolve({ blob, previewUrl });
@@ -103,18 +104,20 @@ export function processProfileImage(file, targetDimension = 512, quality = 0.85)
 }
 
 /**
- * Uploads processed photo blob to Firebase Storage under user-isolated path.
+ * Uploads a processed photo to Firebase Storage with progress reporting and
+ * a hard timeout so a stalled WebView/network request cannot leave the UI stuck forever.
  */
-export async function uploadProfilePhotoToStorage(userId, personId, blob) {
+export async function uploadProfilePhotoToStorage(userId, personId, blob, onProgress) {
   if (!userId) throw new Error('Utilisateur non identifié.');
   if (!personId) throw new Error('Identifiant du compte manquant.');
+  if (!(blob instanceof Blob) || blob.size <= 0) throw new Error('Image vide ou invalide.');
 
   const safePersonId = String(personId);
   const storagePath = `profilePhotos/${userId}/${safePersonId}_${Date.now()}.jpg`;
   const storageRef = ref(storage, storagePath);
-
   const metadata = {
     contentType: 'image/jpeg',
+    cacheControl: 'public,max-age=31536000',
     customMetadata: {
       userId,
       personId: safePersonId,
@@ -122,9 +125,59 @@ export async function uploadProfilePhotoToStorage(userId, personId, blob) {
     }
   };
 
-  await uploadBytes(storageRef, blob, metadata);
-  const downloadUrl = await getDownloadURL(storageRef);
-  return { downloadUrl, storagePath };
+  return new Promise((resolve, reject) => {
+    const uploadTask = uploadBytesResumable(storageRef, blob, metadata);
+    let settled = false;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      fn(value);
+    };
+
+    const timeoutId = setTimeout(() => {
+      try { uploadTask.cancel(); } catch {}
+      finish(reject, new Error('Le téléversement de la photo a pris trop de temps. Vérifiez votre connexion Internet puis réessayez.'));
+    }, UPLOAD_TIMEOUT_MS);
+
+    uploadTask.on(
+      'state_changed',
+      snapshot => {
+        const progress = snapshot.totalBytes > 0
+          ? Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)
+          : 0;
+        onProgress?.(progress);
+      },
+      error => {
+        let message = 'Échec du téléversement de la photo.';
+        if (error?.code === 'storage/unauthorized') {
+          message = "Vous n'avez pas l'autorisation d'enregistrer cette photo.";
+        } else if (error?.code === 'storage/canceled') {
+          message = 'Le téléversement de la photo a été annulé.';
+        } else if (error?.code === 'storage/retry-limit-exceeded') {
+          message = 'Le réseau est instable. Le téléversement a été interrompu.';
+        } else if (error?.message) {
+          message = `Échec du téléversement de la photo : ${error.message}`;
+        }
+        finish(reject, new Error(message));
+      },
+      async () => {
+        try {
+          const downloadUrl = await Promise.race([
+            getDownloadURL(storageRef),
+            new Promise((_, rejectUrl) =>
+              setTimeout(() => rejectUrl(new Error('Impossible de récupérer le lien de la photo.')), DOWNLOAD_URL_TIMEOUT_MS)
+            )
+          ]);
+          onProgress?.(100);
+          finish(resolve, { downloadUrl, storagePath });
+        } catch (error) {
+          finish(reject, error instanceof Error ? error : new Error('Impossible de récupérer le lien de la photo.'));
+        }
+      }
+    );
+  });
 }
 
 /**
@@ -132,8 +185,7 @@ export async function uploadProfilePhotoToStorage(userId, personId, blob) {
  */
 export async function deleteProfilePhotoFromStorage(photoURL) {
   if (!photoURL || typeof photoURL !== 'string') return;
-  
-  // Only attempt deletion if it's a Firebase Storage URL or path
+
   try {
     if (photoURL.startsWith('http') && photoURL.includes('firebasestorage.googleapis.com')) {
       const storageRef = ref(storage, photoURL);
@@ -143,7 +195,6 @@ export async function deleteProfilePhotoFromStorage(photoURL) {
       await deleteObject(storageRef);
     }
   } catch (err) {
-    // Ignore if object doesn't exist or permission already revoked
     console.warn('Could not delete old storage image:', err?.message || err);
   }
 }
