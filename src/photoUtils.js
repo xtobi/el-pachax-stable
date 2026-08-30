@@ -1,8 +1,8 @@
-import { doc, deleteDoc, setDoc } from 'firebase/firestore';
-import { db } from './firebase';
+import { collection, deleteDoc, doc, getDocs, setDoc } from 'firebase/firestore';
+import { auth, db } from './firebase';
 
 const MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024; // 10MB source image
-const FIRESTORE_PHOTO_MAX_BYTES = 180 * 1024; // keep each photo safely below the 1 MiB document limit
+const FIRESTORE_PHOTO_MAX_BYTES = 180 * 1024; // safely below Firestore's 1 MiB document limit
 const FIRESTORE_WRITE_TIMEOUT_MS = 30 * 1000;
 
 export function validateImageFile(file) {
@@ -45,11 +45,6 @@ function withTimeout(promise, timeoutMs, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
-/**
- * Resizes/crops a profile image and compresses it as JPEG.
- * The target is intentionally compact because the final image is stored in
- * a dedicated Firestore document, not in Firebase Storage.
- */
 export function processProfileImage(file, targetDimension = 384, quality = 0.78) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -70,35 +65,29 @@ export function processProfileImage(file, targetDimension = 384, quality = 0.78)
           const minEdge = Math.min(img.width, img.height);
           const sx = (img.width - minEdge) / 2;
           const sy = (img.height - minEdge) / 2;
-
           ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = 'high';
           ctx.drawImage(img, sx, sy, minEdge, minEdge, 0, 0, targetDimension, targetDimension);
 
-          canvas.toBlob(
-            blob => {
-              if (!blob) return reject(new Error("Erreur lors de la compression de l'image."));
-              if (blob.size > FIRESTORE_PHOTO_MAX_BYTES) {
-                // Retry with a smaller avatar and lower JPEG quality rather than
-                // creating a Firestore document that is unnecessarily large.
-                canvas.toBlob(
-                  smallerBlob => {
-                    if (!smallerBlob || smallerBlob.size > FIRESTORE_PHOTO_MAX_BYTES) {
-                      reject(new Error("La photo reste trop volumineuse après compression. Choisissez une autre image."));
-                      return;
-                    }
-                    resolve({ blob: smallerBlob, previewUrl: URL.createObjectURL(smallerBlob) });
-                  },
-                  'image/jpeg',
-                  0.62
-                );
-                return;
-              }
-              resolve({ blob, previewUrl: URL.createObjectURL(blob) });
-            },
-            'image/jpeg',
-            quality
-          );
+          const finish = (blob, previewUrl) => {
+            if (!blob || blob.size > FIRESTORE_PHOTO_MAX_BYTES) {
+              reject(new Error("La photo reste trop volumineuse après compression. Choisissez une autre image."));
+              return;
+            }
+            resolve({ blob, previewUrl });
+          };
+
+          canvas.toBlob(blob => {
+            if (blob && blob.size <= FIRESTORE_PHOTO_MAX_BYTES) {
+              finish(blob, URL.createObjectURL(blob));
+              return;
+            }
+            canvas.toBlob(
+              smallerBlob => finish(smallerBlob, smallerBlob ? URL.createObjectURL(smallerBlob) : null),
+              'image/jpeg',
+              0.62
+            );
+          }, 'image/jpeg', quality);
         } catch (err) {
           reject(err);
         }
@@ -112,11 +101,11 @@ export function processProfileImage(file, targetDimension = 384, quality = 0.78)
 }
 
 /**
- * Stores the processed avatar in a dedicated Firestore document:
+ * Stores the processed avatar in:
  * /users/{uid}/profilePhotos/{personId}
  *
- * The returned downloadUrl name is kept for compatibility with the existing
- * UI, but it is now a data URL and never points to Firebase Storage.
+ * The existing downloadUrl return name is intentionally preserved so the
+ * current UI code does not need to know that Storage has been removed.
  */
 export async function uploadProfilePhotoToFirestore(userId, personId, blob, onProgress) {
   if (!userId) throw new Error('Utilisateur non identifié. Veuillez vous reconnecter.');
@@ -151,19 +140,46 @@ export async function uploadProfilePhotoToFirestore(userId, personId, blob, onPr
 }
 
 export async function deleteProfilePhotoFromFirestore(userId, personId) {
-  if (!userId || !personId) return;
-  const photoRef = doc(db, 'users', String(userId), 'profilePhotos', String(personId));
+  // New code can pass uid + personId directly.
+  if (userId && personId) {
+    const photoRef = doc(db, 'users', String(userId), 'profilePhotos', String(personId));
+    try {
+      await withTimeout(
+        deleteDoc(photoRef),
+        FIRESTORE_WRITE_TIMEOUT_MS,
+        'La suppression de la photo dans Firestore a pris trop de temps.'
+      );
+    } catch (err) {
+      console.warn('Could not delete Firestore profile image:', err?.code || err?.message || err);
+    }
+    return;
+  }
+
+  // Backward compatibility: the current UI passes the old photoURL/data URL only.
+  // Find the matching profile-photo document for the signed-in user and delete it.
+  const photoDataUrl = userId;
+  const uid = auth.currentUser?.uid;
+  if (!uid || typeof photoDataUrl !== 'string') return;
+
   try {
-    await withTimeout(
-      deleteDoc(photoRef),
+    const photosSnapshot = await withTimeout(
+      getDocs(collection(db, 'users', uid, 'profilePhotos')),
       FIRESTORE_WRITE_TIMEOUT_MS,
-      'La suppression de la photo dans Firestore a pris trop de temps.'
+      'La recherche de la photo à supprimer a pris trop de temps.'
     );
+    const matching = photosSnapshot.docs.find(d => d.data()?.dataUrl === photoDataUrl);
+    if (matching) {
+      await withTimeout(
+        deleteDoc(matching.ref),
+        FIRESTORE_WRITE_TIMEOUT_MS,
+        'La suppression de la photo dans Firestore a pris trop de temps.'
+      );
+    }
   } catch (err) {
     console.warn('Could not delete Firestore profile image:', err?.code || err?.message || err);
   }
 }
 
-// Backward-compatible aliases for any code that still imports the old names.
+// Backward-compatible names used by the existing UI.
 export const uploadProfilePhotoToStorage = uploadProfilePhotoToFirestore;
 export const deleteProfilePhotoFromStorage = deleteProfilePhotoFromFirestore;
