@@ -3,6 +3,35 @@ import { db } from './firebase';
 
 export const MIGRATION_VERSION = 'carnetdedettes-2026-08-29-v3-15p-66t';
 
+/**
+ * Recursively cleans and removes all keys with `undefined` values from objects
+ * and arrays before writing to Firestore.
+ * Preserves valid null, false, 0, "", non-empty strings, numbers, etc.
+ */
+export function sanitizeFirestoreData(data) {
+  if (data === undefined) {
+    return undefined;
+  }
+  if (data === null || typeof data !== 'object') {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data
+      .map(item => sanitizeFirestoreData(item))
+      .filter(item => item !== undefined);
+  }
+  const clean = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (value !== undefined) {
+      const sanitized = sanitizeFirestoreData(value);
+      if (sanitized !== undefined) {
+        clean[key] = sanitized;
+      }
+    }
+  }
+  return clean;
+}
+
 export function subscribeToLedger(user, onData, onError, onMigrationStatus) {
   if (!user?.uid) return () => {};
   const ref = doc(db, 'users', user.uid);
@@ -44,7 +73,7 @@ export function subscribeToLedger(user, onData, onError, onMigrationStatus) {
 export async function executeMigrationToFirestore(user, people) {
   if (!user?.uid) throw new Error('Utilisateur non connecté');
   const ref = doc(db, 'users', user.uid);
-  await setDoc(ref, {
+  const payload = sanitizeFirestoreData({
     people,
     importVersion: MIGRATION_VERSION,
     migrationCompleted: true,
@@ -54,14 +83,16 @@ export async function executeMigrationToFirestore(user, people) {
     totalAccounts: people.length,
     totalTransactions: people.reduce((acc, p) => acc + (p.transactions?.length || 0), 0)
   });
+  await setDoc(ref, payload);
 }
 
 export async function saveLedger(user, people) {
   if (!user?.uid) return;
-  await setDoc(doc(db, 'users', user.uid), {
+  const payload = sanitizeFirestoreData({
     people,
     importVersion: MIGRATION_VERSION,
     migrationCompleted: true,
     updatedAt: new Date().toISOString()
-  }, { merge: true });
+  });
+  await setDoc(doc(db, 'users', user.uid), payload, { merge: true });
 }

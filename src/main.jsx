@@ -39,6 +39,12 @@ import { saveLedger, subscribeToLedger, executeMigrationToFirestore, MIGRATION_V
 import { uploadBackupToDrive, downloadBackupFromDrive } from './drive';
 import { IMPORTED_DATABASE, IMPORTED_PEOPLE } from './importedData';
 import { validateAndNormalizeBackup, createSafetyBackup } from './backupUtils';
+import {
+  validateImageFile,
+  processProfileImage,
+  uploadProfilePhotoToStorage,
+  deleteProfilePhotoFromStorage
+} from './photoUtils';
 import './styles.css';
 import './accountEdit.css';
 import './reference-ui.css';
@@ -126,6 +132,19 @@ function formatTxDateText(v) {
 
 function formatAmountFr(n) {
   return Math.round(Number(n) || 0).toLocaleString('fr-FR').replace(/\u00a0/g, ' ');
+}
+
+function normalizeSearchText(text) {
+  if (!text) return '';
+  return String(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/[إأآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .toLowerCase()
+    .trim();
 }
 
 function balance(p) {
@@ -486,6 +505,16 @@ function App({ user }) {
   const [syncing, setSyncing] = useState(false);
   const [driveStatus, setDriveStatus] = useState('');
 
+  // Profile Photo state
+  const cameraInputRef = useRef(null);
+  const galleryInputRef = useRef(null);
+  const [personPhotoPreview, setPersonPhotoPreview] = useState(null);
+  const [pendingPhotoBlob, setPendingPhotoBlob] = useState(null);
+  const [photoChanged, setPhotoChanged] = useState(false);
+  const [photoError, setPhotoError] = useState('');
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [showPhotoSourceModal, setShowPhotoSourceModal] = useState(false);
+
   function recordSuccessfulBackup() {
     const iso = new Date().toISOString();
     setLastBackupTime(iso);
@@ -527,10 +556,25 @@ function App({ user }) {
   }, [user]);
 
   const filteredPeople = useMemo(() => {
+    const cleanQ = normalizeSearchText(query);
     return people.filter(p => {
-      const q = (p.name || '').toLowerCase().includes(query.toLowerCase()) || (p.phone || '').includes(query);
+      if (cleanQ) {
+        const nameNorm = normalizeSearchText(p.name);
+        const phoneNorm = normalizeSearchText(p.phone);
+        const companyNorm = normalizeSearchText(p.company);
+        const phoneDigits = (p.phone || '').replace(/\D/g, '');
+        const queryDigits = cleanQ.replace(/\D/g, '');
+
+        const matchesName = nameNorm.includes(cleanQ);
+        const matchesPhone = phoneNorm.includes(cleanQ) || (queryDigits.length >= 2 && phoneDigits.includes(queryDigits));
+        const matchesCompany = companyNorm.includes(cleanQ);
+
+        if (!matchesName && !matchesPhone && !matchesCompany) {
+          return false;
+        }
+      }
+
       const b = balance(p);
-      if (!q) return false;
       if (filter === 'due') return b > 0;
       if (filter === 'advance') return b < 0;
       return true;
@@ -769,6 +813,38 @@ function App({ user }) {
     sessionStorage.setItem('el-pachax-migration-dismissed', MIGRATION_VERSION);
   }
 
+  async function handlePhotoSelected(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setPhotoError(validation.error);
+      return;
+    }
+
+    setPhotoError('');
+    setIsUploadingPhoto(true);
+    try {
+      const { blob, previewUrl } = await processProfileImage(file, 512, 0.85);
+      setPendingPhotoBlob(blob);
+      setPersonPhotoPreview(previewUrl);
+      setPhotoChanged(true);
+    } catch (err) {
+      setPhotoError(err?.message || 'Erreur lors du traitement de la photo.');
+    } finally {
+      setIsUploadingPhoto(false);
+    }
+  }
+
+  function handleRemovePhoto() {
+    setPendingPhotoBlob(null);
+    setPersonPhotoPreview(null);
+    setPhotoChanged(true);
+    setPhotoError('');
+  }
+
   function openAddPerson() {
     setEditingPersonId(null);
     setPersonName('');
@@ -776,6 +852,10 @@ function App({ user }) {
     setPersonNote('');
     setPersonCategory('Autres');
     setPersonCompany('Carnet de Dettes');
+    setPersonPhotoPreview(null);
+    setPendingPhotoBlob(null);
+    setPhotoChanged(false);
+    setPhotoError('');
     setShowPerson(true);
   }
 
@@ -791,6 +871,10 @@ function App({ user }) {
     setPersonNote(p.note || '');
     setPersonCategory(p.category || 'Autres');
     setPersonCompany(p.company || 'Carnet de Dettes');
+    setPersonPhotoPreview(p.photoURL || null);
+    setPendingPhotoBlob(null);
+    setPhotoChanged(false);
+    setPhotoError('');
     setShowPersonActions(false);
     setEditScreen(true);
   }
@@ -803,33 +887,65 @@ function App({ user }) {
     setPersonNote('');
     setPersonCategory('Autres');
     setPersonCompany('Carnet de Dettes');
+    setPersonPhotoPreview(null);
+    setPendingPhotoBlob(null);
+    setPhotoChanged(false);
+    setPhotoError('');
   }
 
-  function savePerson(e) {
+  async function savePerson(e) {
     e.preventDefault();
     if (!personName.trim()) return;
-    if (editingPersonId !== null) {
-      const next = people.map(p =>
-        p.id === editingPersonId
-          ? {
-              ...p,
-              name: personName.trim(),
-              phone: personPhone.trim(),
-              note: personNote.trim(),
-              category: personCategory.trim() || 'Autres',
-              company: personCompany.trim() || 'Carnet de Dettes'
+    setIsUploadingPhoto(true);
+    setPhotoError('');
+    try {
+      if (editingPersonId !== null) {
+        const cur = people.find(p => p.id === editingPersonId);
+        let finalPhotoURL = cur?.photoURL || null;
+        if (photoChanged) {
+          if (pendingPhotoBlob && user?.uid) {
+            const { downloadUrl } = await uploadProfilePhotoToStorage(user.uid, editingPersonId, pendingPhotoBlob);
+            finalPhotoURL = downloadUrl;
+            if (cur?.photoURL && cur.photoURL !== downloadUrl) {
+              deleteProfilePhotoFromStorage(cur.photoURL);
             }
-          : p
-      );
-      commit(next);
-      setSelectedId(editingPersonId);
-      closePersonModal();
-      return;
-    }
-    const id = Date.now();
-    const next = [
-      ...people,
-      {
+          } else {
+            finalPhotoURL = null;
+            if (cur?.photoURL) {
+              deleteProfilePhotoFromStorage(cur.photoURL);
+            }
+          }
+        }
+        const next = people.map(p => {
+          if (p.id !== editingPersonId) return p;
+          const updated = {
+            id: p.id,
+            name: personName.trim(),
+            phone: personPhone.trim(),
+            note: personNote.trim(),
+            category: personCategory.trim() || 'Autres',
+            company: personCompany.trim() || 'Carnet de Dettes',
+            transactions: p.transactions || []
+          };
+          if (finalPhotoURL) {
+            updated.photoURL = finalPhotoURL;
+          }
+          return updated;
+        });
+        await commit(next);
+        setSelectedId(editingPersonId);
+        closePersonModal();
+        return;
+      }
+
+      const id = Date.now();
+      let newPhotoURL = null;
+      if (pendingPhotoBlob && user?.uid) {
+        const { downloadUrl } = await uploadProfilePhotoToStorage(user.uid, id, pendingPhotoBlob);
+        newPhotoURL = downloadUrl;
+      }
+
+      const newPerson = {
         id,
         name: personName.trim(),
         phone: personPhone.trim(),
@@ -837,32 +953,72 @@ function App({ user }) {
         category: personCategory.trim() || 'Autres',
         company: personCompany.trim() || 'Carnet de Dettes',
         transactions: []
+      };
+      if (newPhotoURL) {
+        newPerson.photoURL = newPhotoURL;
       }
-    ];
-    commit(next);
-    setSelectedId(id);
-    closePersonModal();
+
+      const next = [...people, newPerson];
+      await commit(next);
+      setSelectedId(id);
+      closePersonModal();
+    } catch (err) {
+      console.error('Error saving person / photo:', err);
+      setPhotoError('Échec de la sauvegarde de la photo: ' + (err?.message || ''));
+    } finally {
+      setIsUploadingPhoto(false);
+    }
   }
 
-  function saveEditScreen(e) {
+  async function saveEditScreen(e) {
     e.preventDefault();
     if (editingPersonId === null) return;
-    const next = people.map(p =>
-      p.id === editingPersonId
-        ? {
-            ...p,
-            name: personName.trim(),
-            phone: personPhone.trim(),
-            note: personNote.trim(),
-            category: personCategory.trim() || 'Autres',
-            company: personCompany.trim() || 'Carnet de Dettes'
+    const cur = people.find(p => p.id === editingPersonId);
+    setIsUploadingPhoto(true);
+    setPhotoError('');
+    try {
+      let finalPhotoURL = cur?.photoURL || null;
+      if (photoChanged) {
+        if (pendingPhotoBlob && user?.uid) {
+          const { downloadUrl } = await uploadProfilePhotoToStorage(user.uid, editingPersonId, pendingPhotoBlob);
+          finalPhotoURL = downloadUrl;
+          if (cur?.photoURL && cur.photoURL !== downloadUrl) {
+            deleteProfilePhotoFromStorage(cur.photoURL);
           }
-        : p
-    );
-    commit(next);
-    setSelectedId(editingPersonId);
-    setEditScreen(false);
-    setEditingPersonId(null);
+        } else {
+          finalPhotoURL = null;
+          if (cur?.photoURL) {
+            deleteProfilePhotoFromStorage(cur.photoURL);
+          }
+        }
+      }
+
+      const next = people.map(p => {
+        if (p.id !== editingPersonId) return p;
+        const updated = {
+          id: p.id,
+          name: personName.trim(),
+          phone: personPhone.trim(),
+          note: personNote.trim(),
+          category: personCategory.trim() || 'Autres',
+          company: personCompany.trim() || 'Carnet de Dettes',
+          transactions: p.transactions || []
+        };
+        if (finalPhotoURL) {
+          updated.photoURL = finalPhotoURL;
+        }
+        return updated;
+      });
+      await commit(next);
+      setSelectedId(editingPersonId);
+      setEditScreen(false);
+      setEditingPersonId(null);
+    } catch (err) {
+      console.error('Error updating person / photo:', err);
+      setPhotoError('Échec du téléversement de la photo: ' + (err?.message || ''));
+    } finally {
+      setIsUploadingPhoto(false);
+    }
   }
 
   function requestDeletePerson(p) {
@@ -880,6 +1036,7 @@ function App({ user }) {
   async function confirmDeletePerson() {
     if (!personToDelete?.id) return;
     const targetId = personToDelete.id;
+    const targetPhotoURL = personToDelete.photoURL;
     const next = people.filter(p => p.id !== targetId);
 
     setShowConfirmDeletePerson(false);
@@ -892,6 +1049,9 @@ function App({ user }) {
     setSelectedId(next[0]?.id || null);
 
     await commit(next);
+    if (targetPhotoURL) {
+      deleteProfilePhotoFromStorage(targetPhotoURL);
+    }
   }
 
   function addTransaction(e) {
@@ -959,10 +1119,68 @@ function App({ user }) {
         </header>
         <form className="accountEditForm" onSubmit={saveEditScreen}>
           <div className="editAvatar">
-            <UserRound size={62} />
-            <button type="button" className="cameraButton">
-              <Camera size={17} />
-            </button>
+            <div
+              className={`editAvatarPreviewWrap ${personPhotoPreview ? 'hasPhoto' : ''}`}
+              onClick={() => setShowPhotoSourceModal(true)}
+            >
+              {personPhotoPreview ? (
+                <img
+                  src={personPhotoPreview}
+                  alt="Profile"
+                  className="editAvatarImg"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <UserRound size={48} />
+              )}
+              <button
+                type="button"
+                className="cameraButton"
+                onClick={e => {
+                  e.stopPropagation();
+                  setShowPhotoSourceModal(true);
+                }}
+                aria-label="Changer la photo"
+              >
+                <Camera size={16} />
+              </button>
+            </div>
+
+            <div className="editAvatarControls">
+              {personPhotoPreview ? (
+                <>
+                  <button
+                    type="button"
+                    className="photoBtn change"
+                    onClick={() => setShowPhotoSourceModal(true)}
+                  >
+                    <Camera size={14} /> Changer la photo
+                  </button>
+                  <button
+                    type="button"
+                    className="photoBtn delete"
+                    onClick={handleRemovePhoto}
+                  >
+                    <Trash2 size={14} /> Supprimer la photo
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="photoBtn add"
+                  onClick={() => setShowPhotoSourceModal(true)}
+                >
+                  <Camera size={14} /> Ajouter une photo
+                </button>
+              )}
+            </div>
+
+            {photoError && (
+              <div className="photoErrorBanner" style={{ marginTop: '8px' }}>
+                <AlertTriangle size={15} />
+                <span>{photoError}</span>
+              </div>
+            )}
           </div>
           <div className="editCard">
             <label>Nom</label>
@@ -1007,7 +1225,9 @@ function App({ user }) {
               placeholder="Note facultative"
             />
           </div>
-          <button className="saveEditButton">Sauvegarder et quitter</button>
+          <button className="saveEditButton" disabled={isUploadingPhoto}>
+            {isUploadingPhoto ? 'Téléversement de la photo...' : 'Sauvegarder et quitter'}
+          </button>
         </form>
         {showConfirmDeletePerson && personToDelete && (
           <ConfirmDeleteModal
@@ -1015,6 +1235,78 @@ function App({ user }) {
             onConfirm={confirmDeletePerson}
             onCancel={cancelDeletePerson}
           />
+        )}
+
+        {/* Hidden inputs for Camera and Gallery photo pickers */}
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{ display: 'none' }}
+          onChange={handlePhotoSelected}
+        />
+        <input
+          ref={galleryInputRef}
+          type="file"
+          accept="image/jpeg,image/jpg,image/png,image/webp,image/*"
+          style={{ display: 'none' }}
+          onChange={handlePhotoSelected}
+        />
+
+        {/* Photo Source Selection Bottom Sheet */}
+        {showPhotoSourceModal && (
+          <div className="photoSourceOverlay" onClick={() => setShowPhotoSourceModal(false)}>
+            <div className="photoSourceSheet" onClick={e => e.stopPropagation()}>
+              <div className="photoSourceHeader">
+                <h4>{personPhotoPreview ? 'Changer la photo' : 'Ajouter une photo'}</h4>
+              </div>
+
+              <div className="photoSourceOptions">
+                <button
+                  type="button"
+                  className="photoSourceOption"
+                  onClick={() => {
+                    setShowPhotoSourceModal(false);
+                    if (cameraInputRef.current) {
+                      cameraInputRef.current.click();
+                    }
+                  }}
+                >
+                  <span className="photoSourceIcon">📷</span>
+                  <div className="photoSourceText">
+                    <b>Prendre une photo</b>
+                    <small>Utiliser l'appareil photo</small>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  className="photoSourceOption"
+                  onClick={() => {
+                    setShowPhotoSourceModal(false);
+                    if (galleryInputRef.current) {
+                      galleryInputRef.current.click();
+                    }
+                  }}
+                >
+                  <span className="photoSourceIcon">🖼️</span>
+                  <div className="photoSourceText">
+                    <b>Choisir depuis la galerie</b>
+                    <small>JPG, PNG, WebP depuis l'appareil</small>
+                  </div>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                className="photoSourceCancel"
+                onClick={() => setShowPhotoSourceModal(false)}
+              >
+                Annuler
+              </button>
+            </div>
+          </div>
         )}
       </div>
     );
@@ -1050,22 +1342,43 @@ function App({ user }) {
       {/* Topbar */}
       <header className="topbar">
         <div className="brandSide">
-          <button className="iconButton" onClick={() => setMobilePage('home')}>
+          <button className="iconButton" onClick={() => setMobilePage('home')} aria-label="Menu principal">
             <Menu size={22} />
           </button>
           <div>
             <h1>Credit Debit</h1>
           </div>
         </div>
-        <div className="topActions">
-          <button className="iconButton">
-            <Search size={20} />
-          </button>
-          <button className="iconButton">
-            <Bell size={20} />
-          </button>
-          <button className="iconButton" onClick={() => setShowSettings(true)}>
-            <MoreVertical size={20} />
+        <div className="headerControls">
+          <div className="headerSearchWrap">
+            <Search size={16} className="headerSearchIcon" />
+            <input
+              type="text"
+              className="headerSearchInput"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Rechercher un compte..."
+              aria-label="Rechercher un compte"
+            />
+            {query && (
+              <button
+                type="button"
+                className="headerSearchClear"
+                onClick={() => setQuery('')}
+                aria-label="Effacer la recherche"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            className="headerSettingsBtn"
+            onClick={() => setShowSettings(true)}
+            aria-label="Paramètres"
+          >
+            <Settings size={17} />
+            <span>Paramètres</span>
           </button>
         </div>
       </header>
@@ -1107,58 +1420,97 @@ function App({ user }) {
 
             {/* Client list */}
             <div className="refPeopleList">
-              {filteredPeople.map(p => {
-                const b = balance(p);
-                const latest = getLatestTransaction(p);
-                const d = formatHomeDate(latest?.date);
-                const initial = (p.name || '?').trim().charAt(0).toUpperCase();
-                return (
-                  <div
-                    key={p.id}
-                    className="refPerson"
-                    onClick={() => {
-                      setSelectedId(p.id);
-                      setMobilePage('person-transactions');
-                    }}
-                  >
-                    <div className="refAvatar">{initial}</div>
-                    <div className="refMain">
-                      <div className="refName" title={p.name}>{p.name || ''}</div>
-                      <div className="refCat">{p.category || 'Autres'}</div>
-                    </div>
-                    <div className="refDate">
-                      {d.top ? (
-                        <>
-                          <span className="refDateTop">{d.top}</span>
-                          <span className="refDateYear">{d.year}</span>
-                        </>
-                      ) : (
-                        <span className="refDateEmpty">—</span>
-                      )}
-                    </div>
-                    <div className={`refAmount ${b >= 0 ? 'advance' : 'debt'}`}>
-                      <span className="refAmountVal">
-                        {b < 0 ? '-' : ''}
-                        {formatAmountFr(Math.abs(b))}
-                      </span>
-                      <span className="refAmountLabel">
-                        {b >= 0 ? 'Avance' : 'Dette'}
-                      </span>
-                    </div>
+              {filteredPeople.length === 0 ? (
+                <div
+                  style={{
+                    padding: '54px 20px',
+                    textAlign: 'center',
+                    color: '#64748b',
+                    fontSize: '15px'
+                  }}
+                >
+                  <Search size={32} style={{ color: '#94a3b8', marginBottom: '10px', display: 'inline-block' }} />
+                  <p style={{ margin: 0, fontWeight: '600', color: '#334155', fontSize: '16px' }}>Aucun compte trouvé</p>
+                  {query && (
                     <button
                       type="button"
-                      className="refMore"
-                      aria-label="Actions"
-                      onClick={e => {
-                        e.stopPropagation();
-                        openPersonActions(p);
+                      onClick={() => setQuery('')}
+                      style={{
+                        marginTop: '14px',
+                        background: '#e0f2fe',
+                        color: '#0284c7',
+                        border: 0,
+                        borderRadius: '6px',
+                        padding: '7px 16px',
+                        fontSize: '13px',
+                        fontWeight: '700',
+                        cursor: 'pointer'
                       }}
                     >
-                      ⋮
+                      Effacer la recherche
                     </button>
-                  </div>
-                );
-              })}
+                  )}
+                </div>
+              ) : (
+                filteredPeople.map(p => {
+                  const b = balance(p);
+                  const latest = getLatestTransaction(p);
+                  const d = formatHomeDate(latest?.date);
+                  const initial = (p.name || '?').trim().charAt(0).toUpperCase();
+                  return (
+                    <div
+                      key={p.id}
+                      className="refPerson"
+                      onClick={() => {
+                        setSelectedId(p.id);
+                        setMobilePage('person-transactions');
+                      }}
+                    >
+                      <div className="refAvatar">
+                        {p.photoURL ? (
+                          <img src={p.photoURL} alt={p.name} referrerPolicy="no-referrer" />
+                        ) : (
+                          initial
+                        )}
+                      </div>
+                      <div className="refMain">
+                        <div className="refName" title={p.name}>{p.name || ''}</div>
+                        <div className="refCat">{p.category || 'Autres'}</div>
+                      </div>
+                      <div className="refDate">
+                        {d.top ? (
+                          <>
+                            <span className="refDateTop">{d.top}</span>
+                            <span className="refDateYear">{d.year}</span>
+                          </>
+                        ) : (
+                          <span className="refDateEmpty">—</span>
+                        )}
+                      </div>
+                      <div className={`refAmount ${b >= 0 ? 'advance' : 'debt'}`}>
+                        <span className="refAmountVal">
+                          {b < 0 ? '-' : ''}
+                          {formatAmountFr(Math.abs(b))}
+                        </span>
+                        <span className="refAmountLabel">
+                          {b >= 0 ? 'Avance' : 'Dette'}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="refMore"
+                        aria-label="Actions"
+                        onClick={e => {
+                          e.stopPropagation();
+                          openPersonActions(p);
+                        }}
+                      >
+                        ⋮
+                      </button>
+                    </div>
+                  );
+                })
+              )}
             </div>
 
             {/* Fixed Bottom Action & Summary Section */}
@@ -1266,9 +1618,20 @@ function App({ user }) {
               <button className="txBack" onClick={() => setMobilePage('home')}>
                 ‹
               </button>
-              <div className="txIdentity">
-                <div className="txPersonName">{selectedPerson.name}</div>
-                {selectedPerson.phone && <div className="txPhone">{selectedPerson.phone}</div>}
+              <div className="txHeaderIdentityWrap">
+                {selectedPerson.photoURL ? (
+                  <div className="txAvatar">
+                    <img src={selectedPerson.photoURL} alt={selectedPerson.name} referrerPolicy="no-referrer" />
+                  </div>
+                ) : (
+                  <div className="txAvatar">
+                    {(selectedPerson.name || '?').trim().charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="txIdentity">
+                  <div className="txPersonName">{selectedPerson.name}</div>
+                  {selectedPerson.phone && <div className="txPhone">{selectedPerson.phone}</div>}
+                </div>
               </div>
               <button className="txTools" onClick={() => openPersonActions(selectedPerson)}>
                 ☰ ⋮
@@ -1399,7 +1762,11 @@ function App({ user }) {
           <div className="accountActionSheet" onClick={e => e.stopPropagation()}>
             <div className="accountActionHeader">
               <span className="actionAvatar">
-                <UserRound size={24} />
+                {selectedPerson.photoURL ? (
+                  <img src={selectedPerson.photoURL} alt={selectedPerson.name} referrerPolicy="no-referrer" />
+                ) : (
+                  <UserRound size={24} />
+                )}
               </span>
               <div>
                 <b>{selectedPerson.name}</b>
@@ -1625,6 +1992,65 @@ function App({ user }) {
         <div className="overlay">
           <form className="modal" onSubmit={savePerson}>
             <h3>{editingPersonId !== null ? 'تعديل معلومات الشخص' : 'إضافة شخص'}</h3>
+
+            {/* Profile Photo Selection */}
+            <div className="addPersonPhotoSection">
+              <div
+                className={`addPersonAvatarWrap ${!personPhotoPreview ? 'empty' : ''}`}
+                onClick={() => setShowPhotoSourceModal(true)}
+              >
+                {personPhotoPreview ? (
+                  <img
+                    src={personPhotoPreview}
+                    alt="Aperçu"
+                    className="addPersonAvatarImg"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="addPersonAvatarPlaceholder">
+                    <UserRound size={34} />
+                    <span className="addPersonAvatarPlus">+</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="addPersonPhotoControls">
+                {personPhotoPreview ? (
+                  <>
+                    <button
+                      type="button"
+                      className="photoActionBtn change"
+                      onClick={() => setShowPhotoSourceModal(true)}
+                    >
+                      <Camera size={13} /> Changer la photo
+                    </button>
+                    <button
+                      type="button"
+                      className="photoActionBtn delete"
+                      onClick={handleRemovePhoto}
+                    >
+                      <Trash2 size={13} /> Supprimer la photo
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="photoActionBtn add"
+                    onClick={() => setShowPhotoSourceModal(true)}
+                  >
+                    <Camera size={13} /> Ajouter une photo
+                  </button>
+                )}
+              </div>
+
+              {photoError && (
+                <div className="photoErrorBanner" style={{ marginTop: '8px' }}>
+                  <AlertTriangle size={14} />
+                  <span>{photoError}</span>
+                </div>
+              )}
+            </div>
+
             <input
               autoFocus
               placeholder="اسم الشخص"
@@ -1653,11 +2079,15 @@ function App({ user }) {
               onChange={e => setPersonNote(e.target.value)}
             />
             <div className="actions">
-              <button type="button" onClick={closePersonModal}>
+              <button type="button" onClick={closePersonModal} disabled={isUploadingPhoto}>
                 إلغاء
               </button>
-              <button className="primary">
-                {editingPersonId !== null ? 'حفظ التعديلات' : 'حفظ'}
+              <button className="primary" disabled={isUploadingPhoto}>
+                {isUploadingPhoto
+                  ? 'جاري حفظ الصورة...'
+                  : editingPersonId !== null
+                  ? 'حفظ التعديلات'
+                  : 'حفظ'}
               </button>
             </div>
           </form>
@@ -1737,6 +2167,78 @@ function App({ user }) {
           loading={migrationLoading}
           error={migrationError}
         />
+      )}
+
+      {/* Hidden inputs for Camera and Gallery photo pickers */}
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: 'none' }}
+        onChange={handlePhotoSelected}
+      />
+      <input
+        ref={galleryInputRef}
+        type="file"
+        accept="image/jpeg,image/jpg,image/png,image/webp,image/*"
+        style={{ display: 'none' }}
+        onChange={handlePhotoSelected}
+      />
+
+      {/* Photo Source Selection Bottom Sheet */}
+      {showPhotoSourceModal && (
+        <div className="photoSourceOverlay" onClick={() => setShowPhotoSourceModal(false)}>
+          <div className="photoSourceSheet" onClick={e => e.stopPropagation()}>
+            <div className="photoSourceHeader">
+              <h4>{personPhotoPreview ? 'Changer la photo' : 'Ajouter une photo'}</h4>
+            </div>
+
+            <div className="photoSourceOptions">
+              <button
+                type="button"
+                className="photoSourceOption"
+                onClick={() => {
+                  setShowPhotoSourceModal(false);
+                  if (cameraInputRef.current) {
+                    cameraInputRef.current.click();
+                  }
+                }}
+              >
+                <span className="photoSourceIcon">📷</span>
+                <div className="photoSourceText">
+                  <b>Prendre une photo</b>
+                  <small>Utiliser l'appareil photo</small>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                className="photoSourceOption"
+                onClick={() => {
+                  setShowPhotoSourceModal(false);
+                  if (galleryInputRef.current) {
+                    galleryInputRef.current.click();
+                  }
+                }}
+              >
+                <span className="photoSourceIcon">🖼️</span>
+                <div className="photoSourceText">
+                  <b>Choisir depuis la galerie</b>
+                  <small>JPG, PNG, WebP depuis l'appareil</small>
+                </div>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              className="photoSourceCancel"
+              onClick={() => setShowPhotoSourceModal(false)}
+            >
+              Annuler
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

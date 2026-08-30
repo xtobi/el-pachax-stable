@@ -109,6 +109,10 @@ export function validateAndNormalizeBackup(rawContent) {
         };
       });
 
+      const photoURL = typeof p.photoURL === 'string' && p.photoURL.trim().length > 0
+        ? p.photoURL.trim()
+        : undefined;
+
       return {
         id: pId,
         name,
@@ -116,6 +120,7 @@ export function validateAndNormalizeBackup(rawContent) {
         note,
         category,
         company,
+        ...(photoURL ? { photoURL } : {}),
         transactions: sanitizedTxs
       };
     });
