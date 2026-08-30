@@ -11,6 +11,7 @@ import { db } from './firebase';
 
 export const MIGRATION_VERSION = 'carnetdedettes-2026-08-29-v3-15p-66t';
 const FIRESTORE_WRITE_TIMEOUT_MS = 30 * 1000;
+const PHOTO_SYNC_CACHE_KEY = 'el-pachax-photo-sync-signatures';
 
 export function sanitizeFirestoreData(data) {
   if (data === undefined) return undefined;
@@ -56,48 +57,64 @@ function mergeProfilePhotos(people, photoMap) {
   });
 }
 
+function getPhotoSignature(dataUrl) {
+  if (typeof dataUrl !== 'string') return '';
+  return `${dataUrl.length}:${dataUrl.slice(0, 80)}:${dataUrl.slice(-80)}`;
+}
+
+function loadPhotoSyncCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PHOTO_SYNC_CACHE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePhotoSyncCache(cache) {
+  try {
+    localStorage.setItem(PHOTO_SYNC_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+}
+
+/**
+ * Writes only changed/imported profile photos to the dedicated Firestore
+ * subcollection. The main ledger document never contains image data, so it
+ * stays comfortably below Firestore's 1 MiB document limit.
+ */
 export async function syncProfilePhotosToFirestore(user, people) {
   if (!user?.uid) return;
-  const photosRef = collection(db, 'users', user.uid, 'profilePhotos');
+  const cache = loadPhotoSyncCache();
   const targetPeople = Array.isArray(people) ? people : [];
-  const desired = new Map();
+  const writes = [];
 
   for (const person of targetPeople) {
     const dataUrl = person?.photoURL || person?.photoData;
-    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
-      desired.set(String(person.id), dataUrl);
-    }
-  }
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) continue;
 
-  const existingSnapshot = await withTimeout(
-    getDocs(photosRef),
-    FIRESTORE_WRITE_TIMEOUT_MS,
-    'La lecture des photos Firestore a pris trop de temps.'
-  );
+    const personId = String(person.id);
+    const signature = getPhotoSignature(dataUrl);
+    if (cache[personId] === signature) continue;
 
-  const writes = [];
-  existingSnapshot.forEach(photoDoc => {
-    if (!desired.has(photoDoc.id)) {
-      writes.push(deleteDoc(photoDoc.ref));
-    }
-  });
-
-  for (const [personId, dataUrl] of desired.entries()) {
     writes.push(
-      setDoc(doc(photosRef, personId), {
+      setDoc(doc(db, 'users', user.uid, 'profilePhotos', personId), {
         personId,
         dataUrl,
         contentType: 'image/jpeg',
         updatedAt: new Date().toISOString()
       })
     );
+    cache[personId] = signature;
   }
 
-  await withTimeout(
-    Promise.all(writes),
-    FIRESTORE_WRITE_TIMEOUT_MS,
-    'La synchronisation des photos Firestore a pris trop de temps.'
-  );
+  if (writes.length > 0) {
+    await withTimeout(
+      Promise.all(writes),
+      FIRESTORE_WRITE_TIMEOUT_MS,
+      'La synchronisation des photos Firestore a pris trop de temps.'
+    );
+    savePhotoSyncCache(cache);
+  }
 }
 
 export function subscribeToLedger(user, onData, onError, onMigrationStatus) {
@@ -194,4 +211,5 @@ export async function saveLedger(user, people) {
     FIRESTORE_WRITE_TIMEOUT_MS,
     'La synchronisation Firestore a pris trop de temps. Vérifiez votre connexion Internet puis réessayez.'
   );
+  await syncProfilePhotosToFirestore(user, people);
 }
