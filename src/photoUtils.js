@@ -1,13 +1,10 @@
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
-import { storage } from './firebase';
+import { doc, deleteDoc, setDoc } from 'firebase/firestore';
+import { db } from './firebase';
 
-const MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-const UPLOAD_TIMEOUT_MS = 45 * 1000;
-const DOWNLOAD_URL_TIMEOUT_MS = 20 * 1000;
+const MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024; // 10MB source image
+const FIRESTORE_PHOTO_MAX_BYTES = 180 * 1024; // keep each photo safely below the 1 MiB document limit
+const FIRESTORE_WRITE_TIMEOUT_MS = 30 * 1000;
 
-/**
- * Validates selected file is an image and within size limit.
- */
 export function validateImageFile(file) {
   if (!file) {
     return { valid: false, error: 'Aucun fichier sélectionné.' };
@@ -31,19 +28,35 @@ export function validateImageFile(file) {
   return { valid: true };
 }
 
-/**
- * Resizes and crops image to a square avatar of targetDimension (default 512x512),
- * compressed as JPEG with high visual quality.
- */
-export function processProfileImage(file, targetDimension = 512, quality = 0.85) {
+function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Erreur lors de la préparation de l'image."));
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.readAsDataURL(blob);
+  });
+}
 
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+/**
+ * Resizes/crops a profile image and compresses it as JPEG.
+ * The target is intentionally compact because the final image is stored in
+ * a dedicated Firestore document, not in Firebase Storage.
+ */
+export function processProfileImage(file, targetDimension = 384, quality = 0.78) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
     reader.onerror = () => reject(new Error('Erreur lors de la lecture du fichier image.'));
 
     reader.onload = e => {
       const img = new Image();
-
       img.onerror = () => reject(new Error("Impossible de charger le format de l'image."));
 
       img.onload = () => {
@@ -65,6 +78,22 @@ export function processProfileImage(file, targetDimension = 512, quality = 0.85)
           canvas.toBlob(
             blob => {
               if (!blob) return reject(new Error("Erreur lors de la compression de l'image."));
+              if (blob.size > FIRESTORE_PHOTO_MAX_BYTES) {
+                // Retry with a smaller avatar and lower JPEG quality rather than
+                // creating a Firestore document that is unnecessarily large.
+                canvas.toBlob(
+                  smallerBlob => {
+                    if (!smallerBlob || smallerBlob.size > FIRESTORE_PHOTO_MAX_BYTES) {
+                      reject(new Error("La photo reste trop volumineuse après compression. Choisissez une autre image."));
+                      return;
+                    }
+                    resolve({ blob: smallerBlob, previewUrl: URL.createObjectURL(smallerBlob) });
+                  },
+                  'image/jpeg',
+                  0.62
+                );
+                return;
+              }
               resolve({ blob, previewUrl: URL.createObjectURL(blob) });
             },
             'image/jpeg',
@@ -83,93 +112,58 @@ export function processProfileImage(file, targetDimension = 512, quality = 0.85)
 }
 
 /**
- * Uploads the already-processed avatar with the simple Firebase Storage upload API.
- * For small 512x512 profile images this is more reliable than resumable uploads in
- * embedded WebViews and mobile browsers. A hard timeout prevents an infinite spinner.
+ * Stores the processed avatar in a dedicated Firestore document:
+ * /users/{uid}/profilePhotos/{personId}
+ *
+ * The returned downloadUrl name is kept for compatibility with the existing
+ * UI, but it is now a data URL and never points to Firebase Storage.
  */
-export async function uploadProfilePhotoToStorage(userId, personId, blob, onProgress) {
+export async function uploadProfilePhotoToFirestore(userId, personId, blob, onProgress) {
   if (!userId) throw new Error('Utilisateur non identifié. Veuillez vous reconnecter.');
   if (!personId) throw new Error('Identifiant du compte manquant.');
   if (!(blob instanceof Blob) || blob.size <= 0) throw new Error('Image vide ou invalide.');
-
-  const safePersonId = String(personId);
-  const storagePath = `profilePhotos/${userId}/${safePersonId}_${Date.now()}.jpg`;
-  const storageRef = ref(storage, storagePath);
-  const metadata = {
-    contentType: 'image/jpeg',
-    cacheControl: 'public,max-age=31536000',
-    customMetadata: {
-      userId: String(userId),
-      personId: safePersonId,
-      uploadedAt: new Date().toISOString()
-    }
-  };
-
-  onProgress?.(0);
-
-  const uploadPromise = uploadBytes(storageRef, blob, metadata);
-  let uploadResult;
-  try {
-    uploadResult = await Promise.race([
-      uploadPromise,
-      new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error('Le téléversement de la photo a pris trop de temps. Vérifiez votre connexion Internet et les autorisations Firebase Storage.')),
-          UPLOAD_TIMEOUT_MS
-        )
-      )
-    ]);
-  } catch (error) {
-    const code = error?.code || '';
-    if (code === 'storage/unauthorized') {
-      throw new Error("Vous n'avez pas l'autorisation d'enregistrer cette photo. Vérifiez les règles Firebase Storage.");
-    }
-    if (code === 'storage/unauthenticated') {
-      throw new Error('Votre session Firebase a expiré. Reconnectez-vous puis réessayez.');
-    }
-    if (code === 'storage/retry-limit-exceeded') {
-      throw new Error('Le réseau est instable. Le téléversement a été interrompu.');
-    }
-    if (code === 'storage/bucket-not-found') {
-      throw new Error('Le stockage Firebase Storage est introuvable ou non configuré pour ce projet.');
-    }
-    if (code === 'storage/quota-exceeded') {
-      throw new Error('Le quota Firebase Storage est dépassé.');
-    }
-    throw new Error(error?.message || 'Échec du téléversement de la photo.');
+  if (blob.size > FIRESTORE_PHOTO_MAX_BYTES) {
+    throw new Error('La photo est trop volumineuse après compression.');
   }
 
-  onProgress?.(90);
-
-  try {
-    const downloadUrl = await Promise.race([
-      getDownloadURL(uploadResult.ref),
-      new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error('Impossible de récupérer le lien de la photo depuis Firebase Storage.')),
-          DOWNLOAD_URL_TIMEOUT_MS
-        )
-      )
-    ]);
-    onProgress?.(100);
-    return { downloadUrl, storagePath };
-  } catch (error) {
-    throw new Error(error?.message || 'Impossible de récupérer le lien de la photo.');
+  onProgress?.(10);
+  const dataUrl = await blobToDataUrl(blob);
+  if (!dataUrl || dataUrl.length > 250000) {
+    throw new Error('La photo compressée est trop volumineuse pour Firestore.');
   }
+
+  onProgress?.(40);
+  const photoRef = doc(db, 'users', String(userId), 'profilePhotos', String(personId));
+  await withTimeout(
+    setDoc(photoRef, {
+      personId: String(personId),
+      dataUrl,
+      contentType: 'image/jpeg',
+      byteSize: blob.size,
+      updatedAt: new Date().toISOString()
+    }),
+    FIRESTORE_WRITE_TIMEOUT_MS,
+    'La sauvegarde de la photo dans Firestore a pris trop de temps. Vérifiez votre connexion Internet.'
+  );
+  onProgress?.(100);
+
+  return { downloadUrl: dataUrl, storagePath: `firestore:users/${userId}/profilePhotos/${personId}` };
 }
 
-/**
- * Attempts to safely remove a photo from Firebase Storage.
- */
-export async function deleteProfilePhotoFromStorage(photoURL) {
-  if (!photoURL || typeof photoURL !== 'string') return;
-
+export async function deleteProfilePhotoFromFirestore(userId, personId) {
+  if (!userId || !personId) return;
+  const photoRef = doc(db, 'users', String(userId), 'profilePhotos', String(personId));
   try {
-    const storageRef = photoURL.startsWith('profilePhotos/')
-      ? ref(storage, photoURL)
-      : ref(storage, photoURL);
-    await deleteObject(storageRef);
+    await withTimeout(
+      deleteDoc(photoRef),
+      FIRESTORE_WRITE_TIMEOUT_MS,
+      'La suppression de la photo dans Firestore a pris trop de temps.'
+    );
   } catch (err) {
-    console.warn('Could not delete old storage image:', err?.code || err?.message || err);
+    console.warn('Could not delete Firestore profile image:', err?.code || err?.message || err);
   }
 }
+
+// Backward-compatible aliases for any code that still imports the old names.
+export const uploadProfilePhotoToStorage = uploadProfilePhotoToFirestore;
+export const deleteProfilePhotoFromStorage = deleteProfilePhotoFromFirestore;
